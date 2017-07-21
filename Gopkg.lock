@@ -38,6 +38,12 @@
   version = "v1.0.2"
 
 [[projects]]
+  name = "github.com/boltdb/bolt"
+  packages = ["."]
+  revision = "583e8937c61f1af6513608ccc75c97b6abdf4ff9"
+  version = "v1.3.0"
+
+[[projects]]
   name = "github.com/cpuguy83/go-md2man"
   packages = ["md2man"]
   revision = "a65d4d2de4d5f7c74868dfa9b202a3c8be315aaa"
@@ -144,6 +150,12 @@
   packages = ["difflib"]
   revision = "792786c7400a136282c1664665ae0a8db921c6c2"
   version = "v1.0.0"
+
+[[projects]]
+  branch = "backend-cache"
+  name = "github.com/remusb/rclone"
+  packages = ["cache"]
+  revision = "347b3ff385f964e7ad7bfbaf473d35fbf37d7371"
 
 [[projects]]
   branch = "master"
@@ -262,6 +274,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "248de1868100335332b37ed2577a3c1559b61c0ab9871da28f800192f9d0ef2b"
+  inputs-digest = "25a7a92a28ebf7708a3c7d88f13c990b90a66bd498ff797b324f90ed3810db64"
   solver-name = "gps-cdcl"
   solver-version = 1
