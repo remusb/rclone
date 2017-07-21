@@ -87,7 +87,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	remotePath := path.Join(remote, cipher.EncryptFileName(rpath))
 	wrappedFs, err := fs.NewFs(remotePath)
 	// if that didn't produce a file, look for a directory
-	if err != fs.ErrorIsFile {
+	if err != fs.ErrorIsFile && err != nil {
 		remotePath = path.Join(remote, cipher.EncryptDirName(rpath))
 		wrappedFs, err = fs.NewFs(remotePath)
 	}
