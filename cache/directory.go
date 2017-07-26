@@ -98,6 +98,17 @@ func NewCachedDirEntries(f *Fs, de fs.DirEntries) *CachedDirEntries {
 	}
 }
 
+// this constructs a new store based on a generic one
+func NewEmptyCachedDirEntries(f *Fs) *CachedDirEntries {
+	var dirEntries fs.DirEntries
+
+	return &CachedDirEntries{
+		CacheFs: f,
+		DirEntries: dirEntries,
+		CacheTs: time.Now(),
+	}
+}
+
 func (ce *CachedDirEntries) AddEntries(de fs.DirEntries) {
 	var dirEntries fs.DirEntries
 

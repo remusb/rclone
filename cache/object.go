@@ -5,9 +5,8 @@ import (
 	"time"
 	"io"
 	"errors"
-	"bytes"
-	"io/ioutil"
 	"path"
+	"math"
 )
 
 // a generic file like object that stores basic information about it
@@ -83,7 +82,118 @@ func (o *CachedObject) RefreshObject() error {
 }
 
 func (o *CachedObject) SetModTime(t time.Time) error {
-	return errors.New("can't SetModTime")
+	if o.Object == nil {
+		o.RefreshObject()
+	}
+
+	o.CacheModTime = t
+
+	err := o.CacheFs.cache.ObjectPut(o)
+	if err != nil {
+		// TODO ignore cache failure
+		fs.Errorf("cache", "Couldn't cache object hash [%v]: %v", o.Remote(), err)
+	}
+
+	return o.Object.SetModTime(t)
+}
+
+func (o *CachedObject) CacheOpen(offset int64, writer *io.PipeWriter) {
+	chunkSize := o.CacheFs.chunkSize
+	// index for start offset of every chunk (starts from requested offset)
+	chunkOffset := offset
+
+	fs.Errorf("cache", "info: object opened (%v:%v)", path.Base(o.Remote()), chunkOffset)
+
+	for {
+		var readBytes []byte
+		var totalReadBytes int64
+		var err error
+
+		// we calculate the modulus of the requested offset with the size of a chunk
+		offsetMod := int64(math.Mod(float64(chunkOffset), float64(chunkSize)))
+
+		// we align the start offset of the first chunk to a likely chunk in the storage
+		// if it's 0, even better, nothing changes
+		// if it's >0, we'll read from the start of the chunk and we'll need to trim the offsetMod bytes from it after EOF
+		if offsetMod > 0 {
+			chunkOffset = chunkOffset - offsetMod
+		}
+
+		fs.Errorf("cache", "info: chunk needed (%v): %v", path.Base(o.Remote()), chunkOffset)
+
+		// search for cached data
+		readBytes, err = o.CacheFs.Cache().ObjectDataGet(o, chunkOffset)
+
+		// something wrong with reading from cache or it simply doesn't exist
+		if err != nil {
+			if o.Object == nil {
+				o.RefreshObject()
+			}
+
+			// Here we add an option for the wrapping FS that we want a chunk of the file
+			rangeOption := &fs.RangeOption{
+				Start: chunkOffset,
+				End: chunkOffset + chunkSize,
+			}
+
+			// open file at desired offset
+			rc, err := o.Object.Open(&fs.SeekOption{ Offset: chunkOffset }, rangeOption)
+			// if something went wrong, we need to close the writer
+			if err != nil {
+				fs.Errorf("cache", "info: object open failed (%v): %v", path.Base(o.Remote()), err)
+				writer.CloseWithError(err)
+				break
+			}
+
+			// read the data from source and close that reader
+			readBytes = make([]byte, chunkSize)
+			c, err := rc.Read(readBytes)
+			totalReadBytes = int64(c)
+			rc.Close()
+
+			// if we can't read from source we abort
+			if err != nil {
+				fs.Errorf("cache", "info: object read error (%v)", path.Base(o.Remote()), err)
+				writer.CloseWithError(err)
+				break
+			}
+
+			// cache the copy
+			err = o.CacheFs.Cache().ObjectDataPut(o, readBytes, chunkOffset)
+			if err != nil {
+				// TODO ignore when caching fails
+				fs.Errorf("cache", "Couldn't cache chunk [%v:%v]: %+v", path.Base(o.Remote()), chunkOffset, err)
+			}
+
+			fs.Errorf("cache", "info: chunk from source (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalReadBytes))
+		} else {
+			totalReadBytes = int64(len(readBytes))
+
+			fs.Errorf("cache", "info: chunk from cache (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalReadBytes))
+		}
+
+		// align the chunk with the original chunk offset
+		if offsetMod > 0 {
+			readBytes = readBytes[offsetMod:]
+			totalReadBytes = int64(len(readBytes))
+			chunkOffset = chunkOffset + offsetMod
+			fs.Errorf("cache", "info: aligned chunk (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalReadBytes))
+		}
+
+		totalWrittenBytes, err := writer.Write(readBytes)
+		if err == io.ErrClosedPipe {
+			//fs.Errorf("cache", "info: object pipe closed already (%v)", path.Base(o.Remote()))
+			fs.Errorf("cache", "info: chunk written (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalWrittenBytes))
+			break
+		} else if err != nil {
+			fs.Errorf("cache", "info: chunk write error (%v): %v", path.Base(o.Remote()), err)
+			writer.CloseWithError(err)
+			break
+		}
+
+		fs.Errorf("cache", "info: chunk written (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalWrittenBytes))
+		chunkOffset = chunkOffset + int64(totalWrittenBytes)
+	}
 }
 
 func (o *CachedObject) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
@@ -95,53 +205,18 @@ func (o *CachedObject) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 			offset = x.Offset
 		default:
 			if option.Mandatory() {
-				fs.Logf(o, "Unsupported mandatory option: %v", option)
+				fs.Errorf("cache", "Unsupported mandatory option: %v", option)
 			}
 		}
 	}
 
 	// start a cleanup in parallel if it's time
-	o.CacheFs.CleanUpCache()
+	//o.CacheFs.CleanUpCache()
 
-	// search for cached data
-	cachedDataReader, bytesRead, err := o.CacheFs.Cache().ObjectDataGet(o, offset)
-	if err != nil {
-		fs.Errorf("cache", "info: object data not found (%v:%v)", path.Base(o.Remote()), offset)
-	} else {
-		fs.Errorf("cache", "info: returning cached data [%v %v:%v]", path.Base(o.Remote()), offset, offset+int64(bytesRead))
-		return ioutil.NopCloser(cachedDataReader), nil
-	}
+	dstReader, dstWriter := io.Pipe()
+	go o.CacheOpen(offset, dstWriter)
 
-	if o.Object == nil {
-		o.RefreshObject()
-	}
-
-	// Here we add an option for the wrapping FS that we want a chunk of the file
-	rangeOption := &fs.RangeOption{
-		Start: offset,
-		End: offset + o.CacheFs.chunkSize,
-	}
-	options = append(options, rangeOption)
-
-	// Get the data from the source and make a copy of it
-	rc, err := o.Object.Open(options...)
-	defer rc.Close() // let's close it cause we got what we need
-	liveData := make([]byte, o.CacheFs.chunkSize)
-	actualRead, err := rc.Read(liveData)
-
-	fs.Errorf("cache", "info: read from source [%v %v:%v]", path.Base(o.Remote()), offset, offset+int64(actualRead))
-
-	// cache the copy
-	err = o.CacheFs.Cache().ObjectDataPut(o, liveData, offset)
-	if err != nil {
-		// TODO return live data when fails?
-		fs.Errorf("cache", "Couldn't cache object data [%v:%v]: %+v", path.Base(o.Remote()), offset, err)
-	}
-
-	fs.Errorf("cache", "info: returning live data [%v %v:%v]", path.Base(o.Remote()), offset, offset+int64(actualRead))
-
-	// return the copy in a new reader
-	return ioutil.NopCloser(bytes.NewReader(liveData)), nil
+	return dstReader, nil
 }
 
 func (o *CachedObject) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {

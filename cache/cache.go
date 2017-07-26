@@ -286,24 +286,16 @@ func (f *Fs) NewObject(remote string) (fs.Object, error) {
 	// Get live object from source or fail
 	liveObject, err := f.Fs.NewObject(remote)
 	if err != nil || liveObject == nil {
-		fs.Errorf("cache", "Something went wrong, couldn't get object (%v) from source fs (%v): %v", remote, f.Fs.Name(), err)
+		fs.Errorf("cache", "couldn't get object (%v) from source fs (%v): %v", remote, f.Fs.Name(), err)
 		return nil, err
 	}
-	//fs.Errorf("cache", "info: Fetched object (%v) from source fs (%v)", remote, f.Fs.Name())
+	fs.Errorf("cache", "info: object (%v) from source fs (%v)", remote, f.Fs.Name())
 
 	// We used the source so let's cache the result for later usage
 	cachedObject = NewCachedObject(f, liveObject)
 	go f.cache.ObjectPut(cachedObject)
 
 	return cachedObject, nil
-	//if err == nil {
-	//	fs.Errorf("cache", "Info: Cached object (%v) from source fs (%v)", remote, f.Fs.Name())
-	//	return cachedObject, nil
-	//}
-
-	// TODO return original object when fails?
-	//fs.Errorf(f.name, "Couldn't cache object [%v]: %v", remote, err)
-	//return liveObject, nil
 }
 
 // List the objects and directories in dir into entries
@@ -316,11 +308,7 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	expiresAt := cachedEntries.CacheTs.Add(f.listAge)
 
 	if err != nil {
-		// TODO log
-		//return nil, err
 		fs.Errorf(f.name, "info: dir entries not found [%v]: %v", dir, err)
-	} else if len(cachedEntries.DirEntries) == 0 {
-		fs.Errorf(f.name, "info: empty dir entries [%v]", dir)
 	} else if time.Now().After(expiresAt) {
 		fs.Errorf(f.name, "info: expired dir entries [%v]", dir)
 	} else {
@@ -330,19 +318,12 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 
 		// todo: always ask from source if we have empty dirs?
 		return entries, nil
-		//if len(entries) == 0 {
-			// TODO log
-			//return nil, err
-		//	fs.Errorf(f.name, "info: empty dir entries [%v]", dir)
-		//} else {
-		//	return entries, nil
-		//}
 	}
 
 	// Get live entries from source or fail
 	entries, err = f.Fs.List(dir)
 	if err != nil || entries == nil {
-		fs.Errorf("cache", "Couldn't list directory (%v) from source fs (%v): %v", dir, f.Fs.Name(), err)
+		fs.Errorf("cache", "couldn't list directory (%v) from source fs (%v): %v", dir, f.Fs.Name(), err)
 		return nil, err
 	}
 
@@ -353,7 +334,7 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	err = f.cache.ListPut(key, cachedEntries)
 	if err != nil {
 		// TODO return original list when fails?
-		fs.Errorf(f.name, "Couldn't cache contents of directory [%v]: %v", dir, err)
+		fs.Errorf(f.name, "couldn't cache contents of directory [%v]: %v", dir, err)
 		return entries, nil
 	}
 
@@ -362,36 +343,64 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 
 // ListR lists the objects and directories of the Fs starting
 // from dir recursively into out.
-// TODO: check it
 func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
-	return f.Fs.Features().ListR(dir, callback)
+	entries, err := f.List(dir)
+	if err != nil {
+		return err
+	}
+
+	return callback(entries)
 }
 
 // Put in to the remote path with the modTime given of the given size
-// TODO Write support
 func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	return nil, errors.New("can't Put")
+	dir := path.Dir(src.Remote())
+	if dir == "." { // if it's root, override it
+		dir = ""
+	}
+	fs.Errorf("cache", "info: object uploading (%v: %v)", dir, path.Base(src.Remote()))
+
+	originalObj, err := f.Fs.Put(in, src, options...)
+	if err != nil {
+		fs.Errorf("cache", "failed to upload object (%v: %v)", dir, path.Base(src.Remote()))
+		return nil, err
+	}
+
+	// TODO: this is expensive
+	f.expireListing(dir)
+	cachedObj := NewCachedObject(f, originalObj)
+
+	return cachedObj, err
 }
 
 // Hashes returns the supported hash sets.
-func (f *Fs) Hashes() fs.HashSet {
-	return fs.HashSet(fs.HashNone)
+func (f *Fs)  () fs.HashSet {
+	return f.Fs.Hashes()
 }
 
 // Mkdir makes the directory (container, bucket)
-// TODO Write support
 func (f *Fs) Mkdir(dir string) error {
-	return errors.New("can't Mkdir")
+	return f.Fs.Mkdir(dir)
 }
 
 // Rmdir removes the directory (container, bucket) if empty
-// TODO Write support
 func (f *Fs) Rmdir(dir string) error {
-	return errors.New("can't Rmdir")
+	key := "/" + dir
+
+	err := f.Fs.Rmdir(dir)
+	if err != nil {
+		fs.Errorf("cache", "failed to remove dir (%v): %v", dir, err)
+		return err
+	}
+
+	err = f.cache.ListRemove(key)
+	if err != nil {
+		fs.Errorf("cache", "failed to remove cached dir (%v): %v", dir, err)
+	}
+	return nil
 }
 
 // Purge all files in the root and the root directory
-// TODO Write support
 func (f *Fs) Purge() error {
 	do := f.Fs.Features().Purge
 	if do == nil {
@@ -407,9 +416,26 @@ func (f *Fs) Purge() error {
 }
 
 // Copy src to this remote using server side copy operations.
-// TODO Write support
 func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
-	return nil, fs.ErrorCantCopy
+	do := f.Fs.Features().Copy
+	if do == nil {
+		return nil, fs.ErrorCantCopy
+	}
+
+	originalObj, err := do(src, remote)
+	if err != nil {
+		fs.Errorf("cache", "failed to copy object (%v -> %v): %v", src.Remote(), remote, err)
+		return nil, fs.ErrorCantCopy
+	}
+
+	dir := path.Dir(remote)
+	if dir == "." { // if it's root, override it
+		dir = ""
+	}
+	f.expireListing(dir)
+	cachedObj := NewCachedObject(f, originalObj)
+
+	return cachedObj, nil
 }
 
 // Move src to this remote using server side move operations.
@@ -455,11 +481,6 @@ func (f *Fs) CleanUpCache() error {
 	fs.Errorf("cache", "info: starting stats")
 	f.cache.Stats()
 
-	//if err != nil {
-	//	fs.Errorf("cache", "Couldn't cleanup cache", err)
-	//	return err
-	//}
-
 	f.lastCleanup = time.Now()
 	return nil
 }
@@ -467,6 +488,28 @@ func (f *Fs) CleanUpCache() error {
 // UnWrap returns the Fs that this Fs is wrapping
 func (f *Fs) UnWrap() fs.Fs {
 	return f.Fs
+}
+
+func (f *Fs) expireListing(dir string) error {
+	key := "/" + dir
+
+	// Get raw cached entries from cache
+	cachedEntries := NewEmptyCachedDirEntries(f)
+	err := f.cache.ListGet(key, cachedEntries)
+	if err != nil {
+		fs.Errorf(f.name, "info: dir entries not found [%v]: %v", key, err)
+		return err
+	}
+	cachedEntries.CacheTs = cachedEntries.CacheTs.Truncate(f.listAge)
+
+	// let's cache the result for later usage
+	err = f.cache.ListPut(key, cachedEntries)
+	if err != nil {
+		fs.Errorf(f.name, "couldn't cache contents of directory [%v]: %v", key, err)
+		return err
+	}
+
+	return err
 }
 
 // Check the interfaces are satisfied

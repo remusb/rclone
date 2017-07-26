@@ -2,7 +2,6 @@ package cache
 
 import (
 	"time"
-	"io"
 
 	"github.com/pkg/errors"
 	"github.com/boltdb/bolt"
@@ -22,7 +21,6 @@ const (
 	InfoBucket = "info"
 	DataBucket = "data"
 	StatsBucket = "stats"
-	TsKeyPrefix = "ts-"
 	TsBucket = "ts"
 )
 
@@ -111,6 +109,45 @@ func (b *Bolt) ListPut(dir string, entries *CachedDirEntries) error {
 		err = bucket.Put([]byte(dir), encoded)
 		if err != nil {
 			return errors.Errorf("Couldn't store directory (%v) entries : %v", dir, err)
+		}
+
+		return nil
+	})
+
+	return err
+}
+
+func (b *Bolt) ListRemove(dir string) error {
+	err := b.db.Update(func(tx *bolt.Tx) error {
+		prefix := []byte(dir)
+		bucket, err := tx.CreateBucketIfNotExists([]byte(ListBucket))
+		if err != nil {
+			return errors.Errorf("Couldn't open or create bucket (%v): %v", ListBucket, err)
+		}
+
+		c := bucket.Cursor()
+		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+			c.Delete()
+		}
+
+		bucket = tx.Bucket([]byte(InfoBucket))
+		if bucket == nil {
+			return errors.Errorf("Couldn't open (%v) bucket", InfoBucket)
+		}
+
+		c = bucket.Cursor()
+		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+			c.Delete()
+		}
+
+		bucket = tx.Bucket([]byte(DataBucket))
+		if bucket == nil {
+			return errors.Errorf("Couldn't open (%v) bucket", DataBucket)
+		}
+
+		c = bucket.Cursor()
+		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+			c.Delete()
 		}
 
 		return nil
@@ -211,16 +248,16 @@ func (b *Bolt) objectDataTs(tx *bolt.Tx, path string, offset int64) {
 		}
 	}
 
-	err := tsBucket.Put([]byte(time.Now().Format(time.RFC3339)), []byte(tsVal))
+	ts := itob(time.Now().UnixNano())
+	err := tsBucket.Put([]byte(ts), []byte(tsVal))
 	if err != nil {
 		// TODO: Ignore ts update?
 		fs.Errorf("bolt", "Couldn't update ts of cache object (%v): %v", path, err)
 	}
 }
 
-func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) (r io.Reader, bytesRead int, err error) {
+func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) (data []byte, err error) {
 	path := cachedObject.Remote()
-	bytesRead = 0
 
 	err = b.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(DataBucket)).Bucket([]byte(path))
@@ -228,22 +265,20 @@ func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) (r io.Rea
 			return errors.Errorf("Couldn't open (%v.%v) bucket", DataBucket, path)
 		}
 
-		data := bucket.Get(itob(offset))
-		if data == nil {
+		val := bucket.Get(itob(offset))
+		if val == nil {
 			return errors.Errorf("Couldn't get cached object data (%v) at offset %v", path, offset)
 		}
-		bytesRead = len(data)
-
-		r = bytes.NewReader(data)
+		data = cloneBytes(val)
 
 		return nil
 	})
 
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
-	b.db.Batch(func(tx *bolt.Tx) error {
+	go b.db.Batch(func(tx *bolt.Tx) error {
 		b.cleanupMux.Lock()
 		defer b.cleanupMux.Unlock()
 
@@ -252,7 +287,7 @@ func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) (r io.Rea
 		return nil
 	})
 
-	return r, bytesRead, err
+	return data, err
 }
 
 func (b *Bolt) ObjectDataPut(cachedObject *CachedObject, data []byte, offset int64) error {
@@ -269,9 +304,15 @@ func (b *Bolt) ObjectDataPut(cachedObject *CachedObject, data []byte, offset int
 			return errors.Errorf("Couldn't cache object data (%v) at offset %v", path, offset)
 		}
 
+		return nil
+	})
+
+	go b.db.Batch(func(tx *bolt.Tx) error {
+		b.cleanupMux.Lock()
+		defer b.cleanupMux.Unlock()
+
 		// save touch ts for the newly cached piece
 		b.objectDataTs(tx, path, offset)
-
 		return nil
 	})
 
@@ -294,8 +335,8 @@ func (b *Bolt) ObjectDataClean(chunkAge time.Duration) {
 		}
 
 		cnt := 0
-		min := []byte("1990-01-01T00:00:00Z")
-		max := []byte(time.Now().Truncate(chunkAge).Format(time.RFC3339))
+		min := itob(0)
+		max := itob(time.Now().Truncate(chunkAge).UnixNano())
 
 		// iterate through ts
 		c := bucket.Cursor()
@@ -410,4 +451,11 @@ func itob(v int64) []byte {
 
 func boit(v []byte) int64 {
 	return int64(binary.BigEndian.Uint64(v))
+}
+
+// cloneBytes returns a copy of a given slice.
+func cloneBytes(v []byte) []byte {
+	var clone = make([]byte, len(v))
+	copy(clone, v)
+	return clone
 }
