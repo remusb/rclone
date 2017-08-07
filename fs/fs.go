@@ -3,8 +3,10 @@ package fs
 
 import (
 	"io"
+	"io/ioutil"
 	"log"
 	"math"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -46,6 +48,7 @@ var (
 	ErrorNotAFile                    = errors.New("is a not a regular file")
 	ErrorNotDeleting                 = errors.New("not deleting files as there were IO errors")
 	ErrorCantMoveOverlapping         = errors.New("can't move files on overlapping remotes")
+	ErrorDirectoryNotEmpty           = errors.New("directory not empty")
 )
 
 // RegInfo provides information about a filesystem
@@ -223,6 +226,10 @@ type Directory interface {
 	// Items returns the count of items in this directory or this
 	// directory and subdirectories if known, -1 for unknown
 	Items() int64
+
+	// ID returns the internal ID of this directory if known, or
+	// "" otherwise
+	ID() string
 }
 
 // MimeTyper is an optional interface for Object
@@ -312,6 +319,17 @@ type Features struct {
 	// exists.
 	PutUnchecked func(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
 
+	// PutStream uploads to the remote path with the modTime given of indeterminate size
+	//
+	// May create the object even if it returns an error - if so
+	// will return the object and the error, otherwise will return
+	// nil and the error
+	PutStream func(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
+
+	// MergeDirs merges the contents of all the directories passed
+	// in into the first one and rmdirs the other directories.
+	MergeDirs func([]Directory) error
+
 	// CleanUp the trash in the Fs
 	//
 	// Implement this if you have a way of emptying the trash or
@@ -365,6 +383,12 @@ func (ft *Features) Fill(f Fs) *Features {
 	if do, ok := f.(PutUncheckeder); ok {
 		ft.PutUnchecked = do.PutUnchecked
 	}
+	if do, ok := f.(PutStreamer); ok {
+		ft.PutStream = do.PutStream
+	}
+	if do, ok := f.(MergeDirser); ok {
+		ft.MergeDirs = do.MergeDirs
+	}
 	if do, ok := f.(CleanUpper); ok {
 		ft.CleanUp = do.CleanUp
 	}
@@ -410,6 +434,12 @@ func (ft *Features) Mask(f Fs) *Features {
 	}
 	if mask.PutUnchecked == nil {
 		ft.PutUnchecked = nil
+	}
+	if mask.PutStream == nil {
+		ft.PutStream = nil
+	}
+	if mask.MergeDirs == nil {
+		ft.MergeDirs = nil
 	}
 	if mask.CleanUp == nil {
 		ft.CleanUp = nil
@@ -515,6 +545,23 @@ type PutUncheckeder interface {
 	// May create duplicates or return errors if src already
 	// exists.
 	PutUnchecked(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
+}
+
+// PutStreamer is an optional interface for Fs
+type PutStreamer interface {
+	// PutStream uploads to the remote path with the modTime given of indeterminate size
+	//
+	// May create the object even if it returns an error - if so
+	// will return the object and the error, otherwise will return
+	// nil and the error
+	PutStream(in io.Reader, src ObjectInfo, options ...OpenOption) (Object, error)
+}
+
+// MergeDirser is an option interface for Fs
+type MergeDirser interface {
+	// MergeDirs merges the contents of all the directories passed
+	// in into the first one and rmdirs the other directories.
+	MergeDirs([]Directory) error
 }
 
 // CleanUpper is an optional interfaces for Fs
@@ -624,6 +671,21 @@ func NewFs(path string) (Fs, error) {
 		return nil, err
 	}
 	return fsInfo.NewFs(configName, fsPath)
+}
+
+// temporaryLocalFs creates a local FS in the OS's temporary directory.
+//
+// No cleanup is performed, the caller must call Purge on the Fs themselves.
+func temporaryLocalFs() (Fs, error) {
+	path, err := ioutil.TempDir("", "rclone-spool")
+	if err == nil {
+		err = os.Remove(path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	path = filepath.ToSlash(path)
+	return NewFs(path)
 }
 
 // CheckClose is a utility function used to check the return from

@@ -11,6 +11,9 @@ import (
 	"reflect"
 	"sync"
 	"time"
+
+	"golang.org/x/net/context" // switch to "context" when we stop supporting go1.6
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -21,7 +24,20 @@ const (
 var (
 	transport   http.RoundTripper
 	noTransport sync.Once
+	tpsBucket   *rate.Limiter // for limiting number of http transactions per second
 )
+
+// Start the token bucket if necessary
+func startHTTPTokenBucket() {
+	if Config.TPSLimit > 0 {
+		tpsBurst := Config.TPSLimitBurst
+		if tpsBurst < 1 {
+			tpsBurst = 1
+		}
+		tpsBucket = rate.NewLimiter(rate.Limit(Config.TPSLimit), tpsBurst)
+		Infof(nil, "Starting HTTP transaction limiter: max %g transactions/s with burst %d", Config.TPSLimit, tpsBurst)
+	}
+}
 
 // A net.Conn that sets a deadline for every Read or Write operation
 type timeoutConn struct {
@@ -217,6 +233,13 @@ func cleanAuth(buf []byte) []byte {
 
 // RoundTrip implements the RoundTripper interface.
 func (t *Transport) RoundTrip(req *http.Request) (resp *http.Response, err error) {
+	// Get transactions per second token first if limiting
+	if tpsBucket != nil {
+		tbErr := tpsBucket.Wait(context.Background()) // FIXME switch to req.Context() when we drop go1.6 support
+		if tbErr != nil {
+			Errorf(nil, "HTTP token bucket error: %v", err)
+		}
+	}
 	// Force user agent
 	req.Header.Set("User-Agent", UserAgent)
 	// Logf request
@@ -248,4 +271,17 @@ func (t *Transport) RoundTrip(req *http.Request) (resp *http.Response, err error
 		checkServerTime(req, resp)
 	}
 	return resp, err
+}
+
+// NewDialer creates a net.Dialer structure with Timeout, Keepalive
+// and LocalAddr set from rclone flags.
+func (ci *ConfigInfo) NewDialer() *net.Dialer {
+	dialer := &net.Dialer{
+		Timeout:   ci.ConnectTimeout,
+		KeepAlive: 30 * time.Second,
+	}
+	if ci.BindAddr != nil {
+		dialer.LocalAddr = &net.TCPAddr{IP: ci.BindAddr}
+	}
+	return dialer
 }

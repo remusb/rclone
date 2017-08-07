@@ -51,6 +51,7 @@ var (
 	uploadCutoff       = fs.SizeSuffix(200E6)
 	b2TestMode         = fs.StringP("b2-test-mode", "", "", "A flag string for X-Bz-Test-Mode header.")
 	b2Versions         = fs.BoolP("b2-versions", "", false, "Include old versions in directory listings.")
+	b2HardDelete       = fs.BoolP("b2-hard-delete", "", false, "Permanently delete files on remote removal, otherwise hide files.")
 	errNotWithVersions = errors.New("can't modify or delete files in --b2-versions mode")
 )
 
@@ -227,7 +228,7 @@ func errorHandler(resp *http.Response) error {
 // NewFs contstructs an Fs from the path, bucket:path
 func NewFs(name, root string) (fs.Fs, error) {
 	if uploadCutoff < chunkSize {
-		return nil, errors.Errorf("b2: upload cutoff must be less than chunk size %v - was %v", chunkSize, uploadCutoff)
+		return nil, errors.Errorf("b2: upload cutoff (%v) must be greater than or equal to chunk size (%v)", uploadCutoff, chunkSize)
 	}
 	if chunkSize < minChunkSize {
 		return nil, errors.Errorf("b2: chunk size can't be less than %v - was %v", minChunkSize, chunkSize)
@@ -303,9 +304,9 @@ func (f *Fs) authorizeAccount() error {
 	f.authMu.Lock()
 	defer f.authMu.Unlock()
 	opts := rest.Opts{
-		Absolute:     true,
 		Method:       "GET",
-		Path:         f.endpoint + "/b2api/v1/b2_authorize_account",
+		Path:         "/b2api/v1/b2_authorize_account",
+		RootURL:      f.endpoint,
 		UserName:     f.account,
 		Password:     f.key,
 		ExtraHeaders: map[string]string{"Authorization": ""}, // unset the Authorization for this request
@@ -699,7 +700,7 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.
 		fs:     f,
 		remote: src.Remote(),
 	}
-	return fs, fs.Update(in, src)
+	return fs, fs.Update(in, src, options...)
 }
 
 // Mkdir creates the bucket if it doesn't exist
@@ -784,6 +785,31 @@ func (f *Fs) Rmdir(dir string) error {
 // Precision of the remote
 func (f *Fs) Precision() time.Duration {
 	return time.Millisecond
+}
+
+// hide hides a file on the remote
+func (f *Fs) hide(Name string) error {
+	bucketID, err := f.getBucketID()
+	if err != nil {
+		return err
+	}
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/b2_hide_file",
+	}
+	var request = api.HideFileRequest{
+		BucketID: bucketID,
+		Name:     Name,
+	}
+	var response api.File
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err := f.srv.CallJSON(&opts, &request, &response)
+		return f.shouldRetry(resp, err)
+	})
+	if err != nil {
+		return errors.Wrapf(err, "failed to hide %q", Name)
+	}
+	return nil
 }
 
 // deleteByID deletes a file version given Name and ID
@@ -1118,10 +1144,9 @@ var _ io.ReadCloser = &openFile{}
 // Open an object for read
 func (o *Object) Open(options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	opts := rest.Opts{
-		Method:   "GET",
-		Absolute: true,
-		Path:     o.fs.info.DownloadURL,
-		Options:  options,
+		Method:  "GET",
+		RootURL: o.fs.info.DownloadURL,
+		Options: options,
 	}
 	// Download by id if set otherwise by name
 	if o.id != "" {
@@ -1322,10 +1347,9 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	// will be returned with the download.
 
 	opts := rest.Opts{
-		Method:   "POST",
-		Absolute: true,
-		Path:     upload.UploadURL,
-		Body:     in,
+		Method:  "POST",
+		RootURL: upload.UploadURL,
+		Body:    in,
 		ExtraHeaders: map[string]string{
 			"Authorization":  upload.AuthorizationToken,
 			"X-Bz-File-Name": urlEncode(o.fs.root + o.remote),
@@ -1363,27 +1387,10 @@ func (o *Object) Remove() error {
 	if *b2Versions {
 		return errNotWithVersions
 	}
-	bucketID, err := o.fs.getBucketID()
-	if err != nil {
-		return err
+	if *b2HardDelete {
+		return o.fs.deleteByID(o.id, o.remote)
 	}
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   "/b2_hide_file",
-	}
-	var request = api.HideFileRequest{
-		BucketID: bucketID,
-		Name:     o.fs.root + o.remote,
-	}
-	var response api.File
-	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err := o.fs.srv.CallJSON(&opts, &request, &response)
-		return o.fs.shouldRetry(resp, err)
-	})
-	if err != nil {
-		return errors.Wrap(err, "failed to delete file")
-	}
-	return nil
+	return o.fs.hide(o.fs.root + o.remote)
 }
 
 // MimeType of an Object if known, "" otherwise

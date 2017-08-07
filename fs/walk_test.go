@@ -54,6 +54,13 @@ func (o mockObject) Update(in io.Reader, src ObjectInfo, options ...OpenOption) 
 }
 func (o mockObject) Remove() error { return errNotImpl }
 
+type unknownDirEntry string
+
+func (o unknownDirEntry) String() string         { return string(o) }
+func (o unknownDirEntry) Remote() string         { return string(o) }
+func (o unknownDirEntry) ModTime() (t time.Time) { return t }
+func (o unknownDirEntry) Size() int64            { return 0 }
+
 func newListDirs(t *testing.T, f Fs, includeAll bool, results listResults, walkErrors errorMap, finalError error) *listDirs {
 	return &listDirs{
 		t:           t,
@@ -280,6 +287,26 @@ func TestWalkLevels(t *testing.T)               { testWalkLevels(t, -1).Walk() }
 func TestWalkRLevels(t *testing.T)              { testWalkLevels(t, -1).WalkR() }
 func TestWalkLevelsNoRecursive10(t *testing.T)  { testWalkLevels(t, 10).Walk() }
 func TestWalkRLevelsNoRecursive10(t *testing.T) { testWalkLevels(t, 10).WalkR() }
+
+func TestWalkNDirTree(t *testing.T) {
+	ls := testWalkLevels(t, -1)
+	entries, err := walkNDirTree(nil, "", ls.includeAll, ls.maxLevel, ls.ListDir)
+	require.NoError(t, err)
+	assert.Equal(t, `/
+  A
+  a/
+a/
+  B
+  b/
+a/b/
+  C
+  c/
+a/b/c/
+  D
+  d/
+a/b/c/d/
+`, entries.String())
+}
 
 func testWalkLevelsNoRecursive(t *testing.T) *listDirs {
 	da := newDir("a")

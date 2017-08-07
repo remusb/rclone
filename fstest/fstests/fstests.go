@@ -7,12 +7,12 @@ package fstests
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -47,16 +47,28 @@ var (
 		Path:    `hello? sausage/êé/Hello, 世界/ " ' @ < > & ? + ≠/z.txt`,
 		WinPath: `hello_ sausage/êé/Hello, 世界/ _ ' @ _ _ & _ + ≠/z.txt`,
 	}
-	file2Contents  = ""
-	verbose        = flag.Bool("verbose", false, "Set to enable logging")
-	dumpHeaders    = flag.Bool("dump-headers", false, "Dump HTTP headers - may contain sensitive info")
-	dumpBodies     = flag.Bool("dump-bodies", false, "Dump HTTP headers and bodies - may contain sensitive info")
-	overrideRemote = flag.String("remote", "", "Set this to override the default remote name (eg s3:)")
-	isLocalRemote  bool
+	file2Contents = ""
+	isLocalRemote bool
 )
 
 // ExtraConfigItem describes a config item added on the fly while testing
 type ExtraConfigItem struct{ Name, Key, Value string }
+
+// Make the Fs we are testing with, initialising the global variables
+// subRemoteName - name of the remote after the TestRemote:
+// subRemoteLeaf - a subdirectory to use under that
+// remote - the result of  fs.NewFs(TestRemote:subRemoteName)
+func newFs(t *testing.T) {
+	var err error
+	subRemoteName, subRemoteLeaf, err = fstest.RandomRemoteName(RemoteName)
+	require.NoError(t, err)
+	remote, err = fs.NewFs(subRemoteName)
+	if err == fs.ErrorNotFoundInConfigFile {
+		t.Logf("Didn't find %q in config file - skipping tests", RemoteName)
+		return
+	}
+	require.NoError(t, err, fmt.Sprintf("unexpected error: %v", err))
+}
 
 // TestInit tests basic intitialisation
 func TestInit(t *testing.T) {
@@ -68,22 +80,14 @@ func TestInit(t *testing.T) {
 		file2.Path = winPath(file2.Path)
 	}
 
-	// Never ask for passwords, fail instead.
-	// If your local config is encrypted set environment variable
-	// "RCLONE_CONFIG_PASS=hunter2" (or your password)
-	*fs.AskPassword = false
-	fs.LoadConfig()
+	fstest.Initialise()
+
 	// Set extra config if supplied
 	for _, item := range ExtraConfig {
 		fs.ConfigFileSet(item.Name, item.Key, item.Value)
 	}
-	if *verbose {
-		fs.Config.LogLevel = fs.LogLevelDebug
-	}
-	fs.Config.DumpHeaders = *dumpHeaders
-	fs.Config.DumpBodies = *dumpBodies
-	if *overrideRemote != "" {
-		RemoteName = *overrideRemote
+	if *fstest.RemoteName != "" {
+		RemoteName = *fstest.RemoteName
 	}
 	t.Logf("Using remote %q", RemoteName)
 	if RemoteName == "" {
@@ -91,15 +95,10 @@ func TestInit(t *testing.T) {
 		require.NoError(t, err)
 		isLocalRemote = true
 	}
-	subRemoteName, subRemoteLeaf, err = fstest.RandomRemoteName(RemoteName)
-	require.NoError(t, err)
 
-	remote, err = fs.NewFs(subRemoteName)
-	if err == fs.ErrorNotFoundInConfigFile {
-		t.Logf("Didn't find %q in config file - skipping tests", RemoteName)
-		return
-	}
-	require.NoError(t, err, fmt.Sprintf("unexpected error: %v", err))
+	newFs(t)
+
+	skipIfNotOk(t)
 	fstest.TestMkdir(t, remote)
 }
 
@@ -147,9 +146,11 @@ func TestFsRoot(t *testing.T) {
 	name := remote.Name() + ":"
 	root := remote.Root()
 	if isLocalRemote {
-		name = ""
+		// only check last path element on local
+		require.Equal(t, filepath.Base(subRemoteName), filepath.Base(root))
+	} else {
+		require.Equal(t, subRemoteName, name+root)
 	}
-	require.Equal(t, subRemoteName, name+root)
 }
 
 // TestFsRmdirEmpty tests deleting an empty directory
@@ -168,6 +169,12 @@ func TestFsRmdirNotFound(t *testing.T) {
 // TestFsMkdir tests tests making a directory
 func TestFsMkdir(t *testing.T) {
 	skipIfNotOk(t)
+
+	// Use a new directory here.  This is for the container based
+	// remotes which take time to create and destroy a container
+	// (eg azure blob)
+	newFs(t)
+
 	fstest.TestMkdir(t, remote)
 	fstest.TestMkdir(t, remote)
 }
@@ -868,6 +875,47 @@ func TestObjectRemove(t *testing.T) {
 	err := obj.Remove()
 	require.NoError(t, err)
 	fstest.CheckListing(t, remote, []fstest.Item{file2})
+}
+
+// TestFsPutUnknownLengthFile tests uploading files when size is not known in advance
+func TestFsPutUnknownLengthFile(t *testing.T) {
+	skipIfNotOk(t)
+
+	file := fstest.Item{
+		ModTime: fstest.Time("2001-02-03T04:05:06.499999999Z"),
+		Path:    "piped data.txt",
+		Size:    -1, // use unknown size during upload
+	}
+
+	tries := 1
+	const maxTries = 10
+again:
+	contentSize := 100
+	contents := fstest.RandomString(contentSize)
+	buf := bytes.NewBufferString(contents)
+	hash := fs.NewMultiHasher()
+	in := io.TeeReader(buf, hash)
+
+	file.Size = -1
+	obji := fs.NewStaticObjectInfo(file.Path, file.ModTime, file.Size, true, nil, nil)
+	obj, err := remote.Put(in, obji)
+	if err != nil {
+		// Retry if err returned a retry error
+		if fs.IsRetryError(err) && tries < maxTries {
+			t.Logf("Put error: %v - low level retry %d/%d", err, tries, maxTries)
+			time.Sleep(2 * time.Second)
+
+			tries++
+			goto again
+		}
+		require.NoError(t, err, fmt.Sprintf("Put Unknown Length error: %v", err))
+	}
+	file.Hashes = hash.Sums()
+	file.Size = int64(contentSize) // use correct size when checking
+	file.Check(t, obj, remote.Precision())
+	// Re-read the object and check again
+	obj = findObject(t, file.Path)
+	file.Check(t, obj, remote.Precision())
 }
 
 // TestObjectPurge tests Purge

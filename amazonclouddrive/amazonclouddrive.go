@@ -427,7 +427,7 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 				// cache the directory ID for later lookups
 				f.dirCache.Put(remote, *node.Id)
 				when, _ := time.Parse(timeFormat, *node.ModifiedDate) // FIXME
-				d := fs.NewDir(remote, when)
+				d := fs.NewDir(remote, when).SetID(*node.Id)
 				entries = append(entries, d)
 			case fileKind:
 				o, err := f.newObjectWithInfo(remote, node)
@@ -552,7 +552,7 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.
 	err := o.readMetaData()
 	switch err {
 	case nil:
-		return o, o.Update(in, src)
+		return o, o.Update(in, src, options...)
 	case fs.ErrorObjectNotFound:
 		// Not found so create it
 	default:

@@ -1,5 +1,5 @@
 SHELL = /bin/bash
-TAG := $(shell echo `git describe --abbrev=8 --tags`-`git rev-parse --abbrev-ref HEAD` | sed 's/-\([0-9]\)-/-0\1-/; s/-\(HEAD\|master\)$$//')
+TAG := $(shell echo `git describe --abbrev=8 --tags`-`git rev-parse --abbrev-ref HEAD` | sed 's/-\([0-9]\)-/-00\1-/; s/-\([0-9][0-9]\)-/-0\1-/; s/-\(HEAD\|master\)$$//')
 LAST_TAG := $(shell git describe --tags --abbrev=0)
 NEW_TAG := $(shell echo $(LAST_TAG) | perl -lpe 's/v//; $$_ += 0.01; $$_ = sprintf("v%.2f", $$_)')
 GO_VERSION := $(shell go version)
@@ -69,6 +69,7 @@ endif
 
 # Update dependencies
 update:
+	go get -u github.com/golang/dep/cmd/dep
 	dep ensure -update -v
 
 doc:	rclone.1 MANUAL.html MANUAL.txt
@@ -126,12 +127,26 @@ upload_beta:
 	rclone --config bin/travis.rclone.conf -v copy --include '*beta-latest*' build/ memstore:beta-rclone-org
 	@echo Beta release ready at $(BETA_URL)
 
+compile_all:
+ifdef GO_LATEST
+	go run bin/cross-compile.go -parallel 8 -compile-only $(BUILDTAGS) $(TAG)β
+else
+	@echo Skipping compile all as not on Go stable
+endif
+
 travis_beta:
 	git log $(LAST_TAG).. > /tmp/git-log.txt
 	go run bin/cross-compile.go -release beta-latest -git-log /tmp/git-log.txt -exclude "^windows/" -parallel 8 $(BUILDTAGS) $(TAG)β
 	rclone --config bin/travis.rclone.conf -v copy --exclude '*beta-latest*' build/ memstore:beta-rclone-org/$(TAG)
 	rclone --config bin/travis.rclone.conf -v copy --include '*beta-latest*' build/ memstore:beta-rclone-org
 	@echo Beta release ready at $(BETA_URL)
+
+# Fetch the windows builds from appveyor
+fetch_windows:
+	rclone -v copy --include 'rclone-v*-windows-*.zip' memstore:beta-rclone-org/$(TAG) build/
+	-#cp -av build/rclone-v*-windows-386.zip build/rclone-current-windows-386.zip
+	-#cp -av build/rclone-v*-windows-amd64.zip build/rclone-current-windows-amd64.zip
+	md5sum build/rclone-*-windows-*.zip | sort
 
 serve:	website
 	cd docs && hugo server -v -w

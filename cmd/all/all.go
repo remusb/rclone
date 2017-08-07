@@ -34,10 +34,12 @@ import (
 	_ "github.com/ncw/rclone/cmd/ncdu"
 	_ "github.com/ncw/rclone/cmd/obscure"
 	_ "github.com/ncw/rclone/cmd/purge"
+	_ "github.com/ncw/rclone/cmd/rcat"
 	_ "github.com/ncw/rclone/cmd/rmdir"
 	_ "github.com/ncw/rclone/cmd/rmdirs"
 	_ "github.com/ncw/rclone/cmd/sha1sum"
 	_ "github.com/ncw/rclone/cmd/size"
 	_ "github.com/ncw/rclone/cmd/sync"
+	_ "github.com/ncw/rclone/cmd/tree"
 	_ "github.com/ncw/rclone/cmd/version"
 )

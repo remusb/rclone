@@ -86,3 +86,12 @@ Contributors
   * Vasiliy Tolstov <v.tolstov@selfip.ru>
   * Harshavardhana <harsha@minio.io>
   * sainaen <sainaen@gmail.com>
+  * gdm85 <gdm85@users.noreply.github.com>
+  * Yaroslav Halchenko <debian@onerussian.com>
+  * John Papandriopoulos <jpap@users.noreply.github.com>
+  * Zhiming Wang <zmwangx@gmail.com>
+  * Andy Pilate <cubox@cubox.me>
+  * Oliver Heyme <olihey@googlemail.com>
+  * wuyu <wuyu@yunify.com>
+  * Andrei Dragomir <adragomi@adobe.com>
+  * Christian Brüggemann <mail@cbruegg.com>

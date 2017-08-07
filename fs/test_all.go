@@ -98,12 +98,26 @@ var (
 			SubDir:   false,
 			FastList: false,
 		},
+		{
+			Name:     "TestBox:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestQingStor:",
+			SubDir:   false,
+			FastList: false,
+		},
+		{
+			Name:     "TestAzureBlob:",
+			SubDir:   true,
+			FastList: true,
+		},
 	}
 	binary = "fs.test"
 	// Flags
 	maxTries = flag.Int("maxtries", 5, "Number of times to try each test")
 	runTests = flag.String("remotes", "", "Comma separated list of remotes to test, eg 'TestSwift:,TestS3'")
-	verbose  = flag.Bool("verbose", false, "Run the tests with -v")
 	clean    = flag.Bool("clean", false, "Instead of testing, clean all left over test directories")
 	runOnly  = flag.String("run-only", "", "Run only those tests matching the regexp supplied")
 )
@@ -129,7 +143,7 @@ func newTest(remote string, subdir bool, fastlist bool) *test {
 		cmdLine: []string{"./" + binary, "-remote", remote},
 		try:     1,
 	}
-	if *verbose {
+	if *fstest.Verbose {
 		t.cmdLine = append(t.cmdLine, "-test.v")
 		fs.Config.LogLevel = fs.LogLevelDebug
 	}
@@ -232,10 +246,11 @@ func (t *test) cleanFs() error {
 	if err != nil {
 		return err
 	}
-	return entries.ForDirError(func(dir *fs.Dir) error {
-		if fstest.MatchTestRemote.MatchString(dir.Name) {
-			log.Printf("Purging %s%s", t.remote, dir.Name)
-			dir, err := fs.NewFs(t.remote + dir.Name)
+	return entries.ForDirError(func(dir fs.Directory) error {
+		remote := dir.Remote()
+		if fstest.MatchTestRemote.MatchString(remote) {
+			log.Printf("Purging %s%s", t.remote, remote)
+			dir, err := fs.NewFs(t.remote + remote)
 			if err != nil {
 				return err
 			}

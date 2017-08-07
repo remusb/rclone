@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"mime"
 	"path"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
@@ -590,6 +592,18 @@ func (ds DirEntries) ForDirError(fn func(dir Directory) error) error {
 	return nil
 }
 
+// DirEntryType returns a string description of the DirEntry, either
+// "object", "directory" or "unknown type XXX"
+func DirEntryType(d DirEntry) string {
+	switch d.(type) {
+	case Object:
+		return "object"
+	case Directory:
+		return "directory"
+	}
+	return fmt.Sprintf("unknown type %T", d)
+}
+
 // ListDirSorted reads Object and *Dir into entries for the given Fs.
 //
 // dir is the start directory, "" for root
@@ -604,34 +618,67 @@ func ListDirSorted(fs Fs, includeAll bool, dir string) (entries DirEntries, err 
 	if err != nil {
 		return nil, err
 	}
+	return filterAndSortDir(entries, includeAll, dir, Config.Filter.IncludeObject, Config.Filter.IncludeDirectory)
+}
 
-	// filter the entries if required
-	if !includeAll {
-		newEntries := entries[:0] // in place filter
-		for _, entry := range entries {
-			switch x := entry.(type) {
-			case Object:
-				// Make sure we don't delete excluded files if not required
-				if Config.Filter.IncludeObject(x) {
-					newEntries = append(newEntries, entry)
-				} else {
-					Debugf(x, "Excluded from sync (and deletion)")
-				}
-			case Directory:
-				if Config.Filter.IncludeDirectory(x.Remote()) {
-					newEntries = append(newEntries, entry)
-				} else {
-					Debugf(x, "Excluded from sync (and deletion)")
-				}
-			default:
-				return nil, errors.Errorf("unknown object type %T", entry)
-			}
-		}
-		entries = newEntries
+// filter (if required) and check the entries, then sort them
+func filterAndSortDir(entries DirEntries, includeAll bool, dir string,
+	IncludeObject func(o Object) bool,
+	IncludeDirectory func(remote string) bool) (newEntries DirEntries, err error) {
+	newEntries = entries[:0] // in place filter
+	prefix := ""
+	if dir != "" {
+		prefix = dir + "/"
 	}
+	for _, entry := range entries {
+		ok := true
+		// check includes and types
+		switch x := entry.(type) {
+		case Object:
+			// Make sure we don't delete excluded files if not required
+			if !includeAll && !IncludeObject(x) {
+				ok = false
+				Debugf(x, "Excluded from sync (and deletion)")
+			}
+		case Directory:
+			if !includeAll && !IncludeDirectory(x.Remote()) {
+				ok = false
+				Debugf(x, "Excluded from sync (and deletion)")
+			}
+		default:
+			return nil, errors.Errorf("unknown object type %T", entry)
+		}
+		// check remote name belongs in this directry
+		remote := entry.Remote()
+		switch {
+		case !ok:
+			// ignore
+		case !strings.HasPrefix(remote, prefix):
+			ok = false
+			Errorf(entry, "Entry doesn't belong in directory %q (too short) - ignoring", dir)
+		case remote == prefix:
+			ok = false
+			Errorf(entry, "Entry doesn't belong in directory %q (same as directory) - ignoring", dir)
+		case strings.ContainsRune(remote[len(prefix):], '/'):
+			ok = false
+			Errorf(entry, "Entry doesn't belong in directory %q (contains subdir) - ignoring", dir)
+		default:
+			// ok
+		}
+		if ok {
+			newEntries = append(newEntries, entry)
+		}
+	}
+	entries = newEntries
 
-	// sort the directory entries by Remote
-	sort.Sort(entries)
+	// Sort the directory entries by Remote
+	//
+	// We use a stable sort here just in case there are
+	// duplicates. Assuming the remote delivers the entries in a
+	// consistent order, this will give the best user experience
+	// in syncing as it will use the first entry for the sync
+	// comparison.
+	sort.Stable(entries)
 	return entries, nil
 }
 
@@ -1304,11 +1351,81 @@ func (x *DeduplicateMode) Type() string {
 // Check it satisfies the interface
 var _ pflag.Value = (*DeduplicateMode)(nil)
 
+// dedupeFindDuplicateDirs scans f for duplicate directories
+func dedupeFindDuplicateDirs(f Fs) ([][]Directory, error) {
+	duplicateDirs := [][]Directory{}
+	err := Walk(f, "", true, Config.MaxDepth, func(dirPath string, entries DirEntries, err error) error {
+		if err != nil {
+			return err
+		}
+		dirs := map[string][]Directory{}
+		entries.ForDir(func(d Directory) {
+			dirs[d.Remote()] = append(dirs[d.Remote()], d)
+		})
+		for _, ds := range dirs {
+			if len(ds) > 1 {
+				duplicateDirs = append(duplicateDirs, ds)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "find duplicate dirs")
+	}
+	return duplicateDirs, nil
+}
+
+// dedupeMergeDuplicateDirs merges all the duplicate directories found
+func dedupeMergeDuplicateDirs(f Fs, duplicateDirs [][]Directory) error {
+	mergeDirs := f.Features().MergeDirs
+	if mergeDirs == nil {
+		return errors.Errorf("%v: can't merge directories", f)
+	}
+	dirCacheFlush := f.Features().DirCacheFlush
+	if dirCacheFlush == nil {
+		return errors.Errorf("%v: can't flush dir cache", f)
+	}
+	for _, dirs := range duplicateDirs {
+		if !Config.DryRun {
+			Infof(dirs[0], "Merging contents of duplicate directories")
+			err := mergeDirs(dirs)
+			if err != nil {
+				return errors.Wrap(err, "merge duplicate dirs")
+			}
+		} else {
+			Infof(dirs[0], "NOT Merging contents of duplicate directories as --dry-run")
+		}
+	}
+	dirCacheFlush()
+	return nil
+}
+
 // Deduplicate interactively finds duplicate files and offers to
 // delete all but one or rename them to be different. Only useful with
 // Google Drive which can have duplicate file names.
 func Deduplicate(f Fs, mode DeduplicateMode) error {
 	Infof(f, "Looking for duplicates using %v mode.", mode)
+
+	// Find duplicate directories first and fix them - repeat
+	// until all fixed
+	for {
+		duplicateDirs, err := dedupeFindDuplicateDirs(f)
+		if err != nil {
+			return err
+		}
+		if len(duplicateDirs) == 0 {
+			break
+		}
+		err = dedupeMergeDuplicateDirs(f, duplicateDirs)
+		if err != nil {
+			return err
+		}
+		if Config.DryRun {
+			break
+		}
+	}
+
+	// Now find duplicate files
 	files := map[string][]Object{}
 	err := Walk(f, "", true, Config.MaxDepth, func(dirPath string, entries DirEntries, err error) error {
 		if err != nil {
@@ -1463,6 +1580,60 @@ func Cat(f Fs, w io.Writer, offset, count int64) error {
 			Errorf(o, "Failed to send to output: %v", err)
 		}
 	})
+}
+
+// Rcat reads data from the Reader until EOF and uploads it to a file on remote
+func Rcat(fdst Fs, dstFileName string, in0 io.ReadCloser, modTime time.Time) (err error) {
+	Stats.Transferring(dstFileName)
+	defer func() {
+		Stats.DoneTransferring(dstFileName, err == nil)
+	}()
+
+	fStreamTo := fdst
+	canStream := fdst.Features().PutStream != nil
+	if !canStream {
+		Debugf(fdst, "Target remote doesn't support streaming uploads, creating temporary local FS to spool file")
+		tmpLocalFs, err := temporaryLocalFs()
+		if err != nil {
+			return errors.Wrap(err, "Failed to create temporary local FS to spool file")
+		}
+		defer func() {
+			err := Purge(tmpLocalFs)
+			if err != nil {
+				Infof(tmpLocalFs, "Failed to cleanup temporary FS: %v", err)
+			}
+		}()
+		fStreamTo = tmpLocalFs
+	}
+
+	objInfo := NewStaticObjectInfo(dstFileName, modTime, -1, false, nil, nil)
+
+	// work out which hash to use - limit to 1 hash in common
+	var common HashSet
+	hashType := HashNone
+	if !Config.SizeOnly {
+		common = fStreamTo.Hashes().Overlap(SupportedHashes)
+		if common.Count() > 0 {
+			hashType = common.GetOne()
+			common = HashSet(hashType)
+		}
+	}
+	hashOption := &HashesOption{Hashes: common}
+
+	in := NewAccountSizeName(in0, -1, dstFileName).WithBuffer()
+
+	if Config.DryRun {
+		Logf("stdin", "Not copying as --dry-run")
+		// prevents "broken pipe" errors
+		_, err = io.Copy(ioutil.Discard, in)
+		return err
+	}
+
+	tmpObj, err := fStreamTo.Features().PutStream(in, objInfo, hashOption)
+	if err == nil && !canStream {
+		err = Copy(fdst, nil, dstFileName, tmpObj)
+	}
+	return err
 }
 
 // Rmdirs removes any empty directories (or directories only

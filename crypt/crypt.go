@@ -248,11 +248,16 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.
 	if err != nil {
 		return nil, err
 	}
-	o, err := f.Fs.Put(wrappedIn, f.newObjectInfo(src))
+	o, err := f.Fs.Put(wrappedIn, f.newObjectInfo(src), options...)
 	if err != nil {
 		return nil, err
 	}
 	return f.newObject(o), nil
+}
+
+// PutStream uploads to the remote path with the modTime given of indeterminate size
+func (f *Fs) PutStream(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	return f.Put(in, src, options...)
 }
 
 // Hashes returns the supported hash sets.
@@ -601,6 +606,7 @@ var (
 	_ fs.Mover          = (*Fs)(nil)
 	_ fs.DirMover       = (*Fs)(nil)
 	_ fs.PutUncheckeder = (*Fs)(nil)
+	_ fs.PutStreamer    = (*Fs)(nil)
 	_ fs.CleanUpper     = (*Fs)(nil)
 	_ fs.UnWrapper      = (*Fs)(nil)
 	_ fs.ListRer        = (*Fs)(nil)

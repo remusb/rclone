@@ -178,6 +178,10 @@ sending them to the trash is required instead then use the
 Here are the command line options specific to this cloud storage
 system.
 
+#### --drive-auth-owner-only ####
+
+Only consider files owned by the authenticated user.
+
 #### --drive-chunk-size=SIZE ####
 
 Upload chunk size. Must a power of 2 >= 256k. Default value is 8 MB.
@@ -187,23 +191,9 @@ is buffered in memory one per transfer.
 
 Reducing this will reduce memory usage but decrease performance.
 
-#### --drive-full-list ####
-
-No longer does anything - kept for backwards compatibility.
-
-#### --drive-upload-cutoff=SIZE ####
-
-File size cutoff for switching to chunked upload.  Default is 8 MB.
-
-#### --drive-use-trash ####
-
-Send files to the trash instead of deleting permanently. Defaults to
-off, namely deleting files permanently.
-
 #### --drive-auth-owner-only ####
 
-Only consider files owned by the authenticated user. Requires
-that --drive-full-list=true (default).
+Only consider files owned by the authenticated user.
 
 #### --drive-formats ####
 
@@ -252,9 +242,31 @@ Here are the possible extensions with their corresponding mime types.
 | xlsx | application/vnd.openxmlformats-officedocument.spreadsheetml.sheet | Microsoft Office Spreadsheet |
 | zip  | application/zip | A ZIP file of HTML, Images CSS |
 
+#### --drive-list-chunk int ####
+
+Size of listing chunk 100-1000. 0 to disable. (default 1000)
+
+#### --drive-shared-with-me ####
+
+Only show files that are shared with me
+
 #### --drive-skip-gdocs ####
 
 Skip google documents in all listings. If given, gdocs practically become invisible to rclone.
+
+#### --drive-trashed-only ####
+
+Only show files that are in the trash.  This will show trashed files
+in their original directory structure.
+
+#### --drive-upload-cutoff=SIZE ####
+
+File size cutoff for switching to chunked upload.  Default is 8 MB.
+
+#### --drive-use-trash ####
+
+Send files to the trash instead of deleting permanently. Defaults to
+off, namely deleting files permanently.
 
 ### Limitations ###
 
@@ -262,6 +274,44 @@ Drive has quite a lot of rate limiting.  This causes rclone to be
 limited to transferring about 2 files per second only.  Individual
 files may be transferred much faster at 100s of MBytes/s but lots of
 small files can take a long time.
+
+Server side copies are also subject to a separate rate limit. If
+you see User rate limit exceeded errors, wait at least 24 hours and
+retry.
+
+### Duplicated files ###
+
+Sometimes, for no reason I've been able to track down, drive will
+duplicate a file that rclone uploads.  Drive unlike all the other
+remotes can have duplicated files.
+
+Duplicated files cause problems with the syncing and you will see
+messages in the log about duplicates.
+
+Use `rclone dedupe` to fix duplicated files.
+
+Note that this isn't just a problem with rclone, even Google Photos on
+Android duplicates files on drive sometimes.
+
+### Rclone appears to be re-copying files it shouldn't ###
+
+There are two possible reasons for rclone to recopy files which
+haven't changed to Google Drive.
+
+The first is the duplicated file issue above - run `rclone dedupe` and
+check your logs for duplicate object or directory messages.
+
+The second is that sometimes Google reports different sizes for the
+Google Docs exports which will cause rclone to re-download Google Docs
+for no apparent reason.  `--ignore-size` is a not very satisfactory
+work-around for this if it is causing you a lot of problems.
+
+### Google docs downloads sometimes fail with "Failed to copy: read X bytes expecting Y" ###
+
+This is the same problem as above.  Google reports the google doc is
+one size, but rclone downloads a different size.  Work-around with the
+`--ignore-size` flag or wait for rclone to retry the download which it
+will.
 
 ### Making your own client_id ###
 

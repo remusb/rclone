@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -96,6 +97,9 @@ var (
 	backupDir       = StringP("backup-dir", "", "", "Make backups into hierarchy based in DIR.")
 	suffix          = StringP("suffix", "", "", "Suffix for use with --backup-dir.")
 	useListR        = BoolP("fast-list", "", false, "Use recursive list if available. Uses more memory but fewer transactions.")
+	tpsLimit        = Float64P("tpslimit", "", 0, "Limit HTTP transactions per second to this.")
+	tpsLimitBurst   = IntP("tpslimit-burst", "", 1, "Max burst of transactions for --tpslimit.")
+	bindAddr        = StringP("bind", "", "", "Local address to bind to for outgoing connections, IPv4, IPv6 or name.")
 	logLevel        = LogLevelNotice
 	statsLogLevel   = LogLevelInfo
 	bwLimit         BwTimetable
@@ -228,6 +232,9 @@ type ConfigInfo struct {
 	Suffix             string
 	UseListR           bool
 	BufferSize         SizeSuffix
+	TPSLimit           float64
+	TPSLimitBurst      int
+	BindAddr           net.IP
 }
 
 // Return the path to the configuration file
@@ -364,9 +371,9 @@ func LoadConfig() {
 	Config.BackupDir = *backupDir
 	Config.Suffix = *suffix
 	Config.UseListR = *useListR
+	Config.TPSLimit = *tpsLimit
+	Config.TPSLimitBurst = *tpsLimitBurst
 	Config.BufferSize = bufferSize
-
-	ConfigPath = *configFile
 
 	Config.TrackRenames = *trackRenames
 
@@ -392,8 +399,23 @@ func LoadConfig() {
 		log.Fatalf(`Can only use --suffix with --backup-dir.`)
 	}
 
+	if *bindAddr != "" {
+		addrs, err := net.LookupIP(*bindAddr)
+		if err != nil {
+			log.Fatalf("--bind: Failed to parse %q as IP address: %v", *bindAddr, err)
+		}
+		if len(addrs) != 1 {
+			log.Fatalf("--bind: Expecting 1 IP address for %q but got %d", *bindAddr, len(addrs))
+		}
+		Config.BindAddr = addrs[0]
+	}
+
 	// Load configuration file.
 	var err error
+	ConfigPath, err = filepath.Abs(*configFile)
+	if err != nil {
+		ConfigPath = *configFile
+	}
 	configData, err = loadConfigFile()
 	if err == errorConfigFileNotFound {
 		Logf(nil, "Config file %q not found - using defaults", ConfigPath)
@@ -413,6 +435,9 @@ func LoadConfig() {
 
 	// Start the bandwidth update ticker
 	startTokenTicker()
+
+	// Start the transactions per second limiter
+	startHTTPTokenBucket()
 }
 
 var errorConfigFileNotFound = errors.New("config file not found")

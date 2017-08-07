@@ -19,21 +19,24 @@ option:
 
 See the following for detailed instructions for
 
-  * [Google Drive](/drive/)
-  * [Amazon S3](/s3/)
-  * [Swift / Rackspace Cloudfiles / Memset Memstore](/swift/)
-  * [Dropbox](/dropbox/)
-  * [Google Cloud Storage](/googlecloudstorage/)
-  * [Local filesystem](/local/)
   * [Amazon Drive](/amazonclouddrive/)
+  * [Amazon S3](/s3/)
   * [Backblaze B2](/b2/)
-  * [Hubic](/hubic/)
-  * [Microsoft OneDrive](/onedrive/)
-  * [Yandex Disk](/yandex/)
-  * [SFTP](/sftp/)
-  * [FTP](/ftp/)
-  * [HTTP](/http/)
+  * [Box](/box/)
   * [Crypt](/crypt/) - to encrypt other remotes
+  * [Dropbox](/dropbox/)
+  * [FTP](/ftp/)
+  * [Google Cloud Storage](/googlecloudstorage/)
+  * [Google Drive](/drive/)
+  * [HTTP](/http/)
+  * [Hubic](/hubic/)
+  * [Microsoft Azure Blob Storage](/azureblob/)
+  * [Microsoft OneDrive](/onedrive/)
+  * [Openstack Swift / Rackspace Cloudfiles / Memset Memstore](/swift/)
+  * [QingStor](/qingstor/)
+  * [SFTP](/sftp/)
+  * [Yandex Disk](/yandex/)
+  * [The local filesystem](/local/)
 
 Usage
 -----
@@ -248,6 +251,13 @@ If running rclone from a script you might want to use today's date as
 the directory name passed to `--backup-dir` to store the old files, or
 you might want to pass `--suffix` with today's date.
 
+### --bind string ###
+
+Local address to bind to for outgoing connections.  This can be an
+IPv4 address (1.2.3.4), an IPv6 address (1234::789A) or host name.  If
+the host name doesn't resolve or resoves to more than one IP address
+it will give an error.
+
 ### --bwlimit=BANDWIDTH_SPEC ###
 
 This option controls the bandwidth limit. Limits can be specified
@@ -282,6 +292,14 @@ measured in Bits/s - to convert divide by 8.  For example, let's say
 you have a 10 Mbit/s connection and you wish rclone to use half of it
 - 5 Mbit/s.  This is 5/8 = 0.625MByte/s so you would use a `--bwlimit
 0.625M` parameter for rclone.
+
+On Unix systems (Linux, MacOS, …) the bandwidth limiter can be toggled by
+sending a `SIGUSR2` signal to rclone. This allows to remove the limitations
+of a long running rclone transfer and to restore it back to the value specified
+with `--bwlimit` quickly when needed. Assuming there is only one rclone instance
+running, you can toggle the limiter like this:
+
+    kill -SIGUSR2 $(pidof rclone)
 
 ### --buffer-size=SIZE ###
 
@@ -566,6 +584,40 @@ If using `--syslog` this sets the syslog facility (eg `KERN`, `USER`).
 See `man syslog` for a list of possible facilities.  The default
 facility is `DAEMON`.
 
+### --tpslimit float ###
+
+Limit HTTP transactions per second to this. Default is 0 which is used
+to mean unlimited transactions per second.
+
+For example to limit rclone to 10 HTTP transactions per second use
+`--tpslimit 10`, or to 1 transaction every 2 seconds use `--tpslimit
+0.5`.
+
+Use this when the number of transactions per second from rclone is
+causing a problem with the cloud storage provider (eg getting you
+banned or rate limited).
+
+This can be very useful for `rclone mount` to control the behaviour of
+applications using it.
+
+See also `--tpslimit-burst`.
+
+### --tpslimit-burst int ###
+
+Max burst of transactions for `--tpslimit`. (default 1)
+
+Normally `--tpslimit` will do exactly the number of transaction per
+second specified.  However if you supply `--tps-burst` then rclone can
+save up some transactions from when it was idle giving a burst of up
+to the parameter supplied.
+
+For example if you provide `--tpslimit-burst 10` then if rclone has
+been idle for more than 10*`--tpslimit` then it can do 10 transactions
+very quickly before they are limited again.
+
+This may be used to increase performance of `--tpslimit` without
+changing the long term average number of transactions per second.
+
 ### --track-renames ###
 
 By default, rclone doesn't keep track of renamed files, so if you
@@ -802,6 +854,9 @@ only.
 
 Dump HTTP headers and bodies - may contain sensitive info.  Can be
 very verbose.  Useful for debugging only.
+
+Note that the bodies are buffered in memory so don't use this for
+enormous files.
 
 ### --dump-filters ###
 
