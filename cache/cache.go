@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DefCacheChunkSize = "50M"
+	DefCacheChunkSize = "5M"
 	DefCacheListAge = "5m"
 	DefCacheFileAge = "5m"
 	DefCacheChunkCleanAge = "2m"
@@ -126,6 +126,7 @@ type Fs struct {
 	root     	string
 	features	*fs.Features // optional features
 	cache   	*Bolt
+	memory		*Memory
 
 	listAge		time.Duration
 	fileAge		time.Duration
@@ -201,10 +202,10 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		fs.Errorf("cache", "Info: Purging the DB")
 	}
 
-	fs.Errorf("cache-" + name, "info: listAge: %v", listDuration.String())
-	fs.Errorf("cache-" + name, "info: fileAge: %v", fileDuration.String())
-	fs.Errorf("cache-" + name, "info: chunkSize: %v", chunkSize.String())
-	fs.Errorf("cache-" + name, "info: chunkCleanMinAge: %v", chunkCleanDuration.String())
+	fs.Errorf("cache", "info: listAge: %v", listDuration.String())
+	fs.Errorf("cache", "info: fileAge: %v", fileDuration.String())
+	fs.Errorf("cache", "info: chunkSize: %v", chunkSize.String())
+	fs.Errorf("cache", "info: chunkCleanMinAge: %v", chunkCleanDuration.String())
 
 	db := NewBolt(*cacheDbPath)
 	err = db.Connect(*cacheDbPurge)
@@ -212,11 +213,14 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		return nil, err
 	}
 
+	m := NewMemory()
+
 	f := &Fs{
 		Fs:     wrappedFs,
 		name:   name,
 		root:   rpath,
 		cache:	db,
+		memory: m,
 		listAge: listDuration,
 		fileAge: fileDuration,
 		chunkSize: int64(chunkSize),
@@ -228,14 +232,15 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		ReadMimeType:    false, // MimeTypes not supported with crypt
 		WriteMimeType:   false,
 		Purge:					 f.Purge,
-		Copy:						 nil,
-		Move:						 nil,
-		DirMove:				 nil,
+		Copy:						 f.Copy,
+		Move:						 f.Move,
+		DirMove:				 f.DirMove,
 		DirChangeNotify: nil, // TODO: Add this
 		DirCacheFlush:	 nil,
-		PutUnchecked:		 nil,
+		PutUnchecked:		 f.PutUnchecked,
 		CleanUp:				 f.CleanUp,
-	}).Fill(f).Mask(wrappedFs)
+		FileReadRaw:		 true,
+	}).Fill(f)
 
 	return f, wrapErr
 }
@@ -264,21 +269,24 @@ func (f *Fs) Cache() *Bolt {
 	return f.cache
 }
 
+func (f *Fs) Memory() *Memory {
+	return f.memory
+}
+
 // NewObject finds the Object at remote.
 // TODO: this is kind of useless
 func (f *Fs) NewObject(remote string) (fs.Object, error) {
-	key := "/" + remote
+	cachedObject, err := f.cache.ObjectGet(f.cleanRemote(remote))
 
-	cachedObject, err := f.cache.ObjectGet(key)
 	if err != nil {
-		fs.Errorf("cache", "info: object not found [%v]: %v", remote, err)
+		fs.Errorf(f, "info: object not found [%v]: %v", remote, err)
 	} else {
 		expiresAt := cachedObject.CacheTs.Add(f.fileAge)
 
 		if time.Now().After(expiresAt) {
-			fs.Errorf("cache", "info: object expired [%v]", remote)
+			fs.Errorf(cachedObject, "info: object expired")
 		} else {
-			fs.Errorf("cache", "info: object found [%v]", remote)
+			fs.Errorf(cachedObject, "info: object found")
 			return cachedObject, nil
 		}
 	}
@@ -286,44 +294,42 @@ func (f *Fs) NewObject(remote string) (fs.Object, error) {
 	// Get live object from source or fail
 	liveObject, err := f.Fs.NewObject(remote)
 	if err != nil || liveObject == nil {
-		fs.Errorf("cache", "couldn't get object (%v) from source fs (%v): %v", remote, f.Fs.Name(), err)
+		fs.Errorf(f, "couldn't get object (%v) from source fs (%v): %v", remote, f.Fs.Name(), err)
 		return nil, err
 	}
-	fs.Errorf("cache", "info: object (%v) from source fs (%v)", remote, f.Fs.Name())
+	fs.Errorf(liveObject, "info: object (%v) from source fs (%v)", remote, f.Fs.Name())
 
 	// We used the source so let's cache the result for later usage
 	cachedObject = NewCachedObject(f, liveObject)
-	go f.cache.ObjectPut(cachedObject)
+	f.cache.ObjectPut(cachedObject)
 
 	return cachedObject, nil
 }
 
 // List the objects and directories in dir into entries
 func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
-	key := "/" + dir
+	key := f.cleanRemote(dir)
 
 	// Get raw cached entries from cache
 	cachedEntries := NewCachedDirEntries(f, entries)
 	err = f.cache.ListGet(key, cachedEntries)
-	expiresAt := cachedEntries.CacheTs.Add(f.listAge)
 
 	if err != nil {
-		fs.Errorf(f.name, "info: dir entries not found [%v]: %v", dir, err)
-	} else if time.Now().After(expiresAt) {
-		fs.Errorf(f.name, "info: expired dir entries [%v]", dir)
+		fs.Errorf(f, "info: couldn't get dir entries from cache [%v]: %v", key, err)
 	} else {
+		f.CleanUpCache()
+
 		// Convert from raw format to proper fs.DirEntries
 		entries = cachedEntries.toDirEntries()
-		fs.Errorf(f.name, "info: found dir entries [%v] %v", dir, len(entries))
+		fs.Errorf(cachedEntries, "info: found dir entries [%v] %v", key, len(entries))
 
-		// todo: always ask from source if we have empty dirs?
 		return entries, nil
 	}
 
 	// Get live entries from source or fail
 	entries, err = f.Fs.List(dir)
 	if err != nil || entries == nil {
-		fs.Errorf("cache", "couldn't list directory (%v) from source fs (%v): %v", dir, f.Fs.Name(), err)
+		fs.Errorf(f, "couldn't list directory (%v) from source fs (%v): %v", key, f.Fs.Name(), err)
 		return nil, err
 	}
 
@@ -334,7 +340,7 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	err = f.cache.ListPut(key, cachedEntries)
 	if err != nil {
 		// TODO return original list when fails?
-		fs.Errorf(f.name, "couldn't cache contents of directory [%v]: %v", dir, err)
+		fs.Errorf(cachedEntries, "couldn't cache contents of directory [%v]: %v", key, err)
 		return entries, nil
 	}
 
@@ -344,6 +350,8 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 // ListR lists the objects and directories of the Fs starting
 // from dir recursively into out.
 func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
+	// we want to get in here to give a chance the cache to return some entries
+	// and maybe even cache everything in one go
 	entries, err := f.List(dir)
 	if err != nil {
 		return err
@@ -354,42 +362,85 @@ func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
 
 // Put in to the remote path with the modTime given of the given size
 func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	dir := path.Dir(src.Remote())
-	if dir == "." { // if it's root, override it
-		dir = ""
-	}
-	fs.Errorf("cache", "info: object uploading (%v: %v)", dir, path.Base(src.Remote()))
+	// get parent folder
+	dir := f.getParentRemote(src.Remote())
+	fs.Errorf(src, "info: object uploading to %v", dir)
 
+	// upload original object
 	originalObj, err := f.Fs.Put(in, src, options...)
 	if err != nil {
-		fs.Errorf("cache", "failed to upload object (%v: %v)", dir, path.Base(src.Remote()))
 		return nil, err
 	}
 
-	// TODO: this is expensive
-	f.expireListing(dir)
+	// build a cached object and inject it in the cached listing of its parent
 	cachedObj := NewCachedObject(f, originalObj)
+	cachedEntries := NewEmptyCachedDirEntries(f)
+
+	err = f.cache.ListGet(dir, cachedEntries)
+	// not in cache or expired
+	if err != nil {
+		fs.Errorf(src, "info: couldn't get parent entries: %v", err)
+		return cachedObj, err
+	}
+
+	// We used the source so let's cache the result for later usage
+	cachedEntries.AddItem(cachedObj)
+	err = f.cache.ListPut(dir, cachedEntries)
+	if err != nil {
+		fs.Errorf(dir, "couldn't cache contents of directory: %v", err)
+	}
 
 	return cachedObj, err
 }
 
 // Hashes returns the supported hash sets.
-func (f *Fs)  () fs.HashSet {
+func (f *Fs) Hashes() fs.HashSet {
 	return f.Fs.Hashes()
 }
 
 // Mkdir makes the directory (container, bucket)
 func (f *Fs) Mkdir(dir string) error {
-	return f.Fs.Mkdir(dir)
+	err := f.Fs.Mkdir(dir)
+
+	if err != nil {
+		return err
+	}
+
+	// make an empty dir
+	cachedEntries := NewEmptyCachedDirEntries(f)
+	err = f.cache.ListPut(f.cleanRemote(dir), cachedEntries)
+	if err != nil {
+		fs.Errorf(dir, "couldn't cache contents of directory: %v", err)
+	}
+
+	// build a cached dir and inject it in the cached listing of its parent
+	parent := f.getParentRemote(dir)
+	cachedObj := NewEmptyCachedDirectory(f, dir)
+	cachedEntries = NewEmptyCachedDirEntries(f)
+
+	err = f.cache.ListGet(parent, cachedEntries)
+	// not in cache or expired
+	if err != nil {
+		fs.Errorf(parent, "info: couldn't get parent entries: %v", err)
+		return nil
+	}
+
+	// We used the source so let's cache the result for later usage
+	cachedEntries.AddItem(cachedObj)
+	err = f.cache.ListPut(parent, cachedEntries)
+	if err != nil {
+		fs.Errorf(parent, "couldn't cache contents of directory: %v", err)
+	}
+
+	return nil
 }
 
 // Rmdir removes the directory (container, bucket) if empty
 func (f *Fs) Rmdir(dir string) error {
-	key := "/" + dir
+	key := f.cleanRemote(dir)
 
 	err := f.Fs.Rmdir(dir)
 	if err != nil {
-		fs.Errorf("cache", "failed to remove dir (%v): %v", dir, err)
 		return err
 	}
 
@@ -397,6 +448,7 @@ func (f *Fs) Rmdir(dir string) error {
 	if err != nil {
 		fs.Errorf("cache", "failed to remove cached dir (%v): %v", dir, err)
 	}
+
 	return nil
 }
 
@@ -409,10 +461,11 @@ func (f *Fs) Purge() error {
 
 	err := do()
 	if err != nil {
-		f.Cache().Purge()
+		return err
 	}
 
-	return err
+	f.Cache().Purge()
+	return nil
 }
 
 // Copy src to this remote using server side copy operations.
@@ -424,37 +477,79 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 
 	originalObj, err := do(src, remote)
 	if err != nil {
-		fs.Errorf("cache", "failed to copy object (%v -> %v): %v", src.Remote(), remote, err)
-		return nil, fs.ErrorCantCopy
+		return originalObj, err
 	}
 
-	dir := path.Dir(remote)
-	if dir == "." { // if it's root, override it
-		dir = ""
-	}
-	f.expireListing(dir)
+	// we could in theory move the chunks around but if they're not really needed, they're gonna sit around in the cache
+
+	f.expireListing(f.getParentRemote(remote))
 	cachedObj := NewCachedObject(f, originalObj)
 
 	return cachedObj, nil
 }
 
 // Move src to this remote using server side move operations.
-// TODO Write support
 func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
-	return nil, fs.ErrorCantMove
+	do := f.Fs.Features().Move
+	if do == nil {
+		return nil, fs.ErrorCantMove
+	}
+
+	originalObj, err := do(src, remote)
+	if err != nil {
+		return originalObj, err
+	}
+
+	// we could in theory move the chunks around but if they're not really needed, they're gonna sit around in the cache
+
+	// expire dest parent
+	f.expireListing(f.getParentRemote(remote))
+	// expire src parent
+	f.expireListing(f.getParentRemote(src.Remote()))
+
+	// remove data from src
+	srcCachedObj := NewCachedObject(f, src)
+	f.cache.ObjectRemove(srcCachedObj)
+
+	cachedObj := NewCachedObject(f, originalObj)
+	return cachedObj, nil
 }
 
 // DirMove moves src, srcRemote to this remote at dstRemote
 // using server side move operations.
-// TODO Write support
 func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
-	return fs.ErrorCantDirMove
+	do := f.Fs.Features().DirMove
+	if do == nil {
+		return fs.ErrorCantDirMove
+	}
+
+	err := do(src, srcRemote, dstRemote)
+	if err != nil {
+		return err
+	}
+
+	// expire dest parent
+	f.expireListing(f.getParentRemote(dstRemote))
+
+	return nil
 }
 
 // PutUnchecked uploads the object
-// TODO Write support
 func (f *Fs) PutUnchecked(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	return nil, errors.New("can't PutUnchecked")
+	do := f.Fs.Features().PutUnchecked
+	if do == nil {
+		return nil, errors.New("can't PutUnchecked")
+	}
+
+	originalObj, err := do(in, src, options...)
+	if err != nil {
+		return nil, err
+	}
+
+	cachedObj := NewCachedObject(f, originalObj)
+	f.expireListing(f.getParentRemote(cachedObj.Remote()))
+
+	return cachedObj, err
 }
 
 // CleanUp the trash in the Fs
@@ -490,26 +585,44 @@ func (f *Fs) UnWrap() fs.Fs {
 	return f.Fs
 }
 
+// this will retrieve a listing from cache and set its timestamp to an older date to expire
 func (f *Fs) expireListing(dir string) error {
-	key := "/" + dir
-
 	// Get raw cached entries from cache
 	cachedEntries := NewEmptyCachedDirEntries(f)
-	err := f.cache.ListGet(key, cachedEntries)
+	err := f.cache.ListGet(dir, cachedEntries)
 	if err != nil {
-		fs.Errorf(f.name, "info: dir entries not found [%v]: %v", key, err)
+		fs.Errorf(f.name, "info: dir entries not found [%v]: %v", dir, err)
 		return err
 	}
 	cachedEntries.CacheTs = cachedEntries.CacheTs.Truncate(f.listAge)
 
 	// let's cache the result for later usage
-	err = f.cache.ListPut(key, cachedEntries)
+	err = f.cache.ListPut(dir, cachedEntries)
 	if err != nil {
-		fs.Errorf(f.name, "couldn't cache contents of directory [%v]: %v", key, err)
+		fs.Errorf(f.name, "couldn't cache contents of directory [%v]: %v", dir, err)
 		return err
 	}
 
 	return err
+}
+
+// gets a parent remote (folder) from the current path and cleans it up
+func (f *Fs) getParentRemote(p string) string {
+	dir := path.Dir(p)
+	if dir == "." { // if it's root, override it
+		dir = ""
+	}
+
+	return f.cleanRemote(dir)
+}
+
+// clean a remote
+func (f *Fs) cleanRemote(p string) string {
+	if p == "." { // if it's root, override it
+		p = ""
+	}
+
+	return "/" + p
 }
 
 // Check the interfaces are satisfied

@@ -138,3 +138,11 @@
 [[constraint]]
   branch = "master"
   name = "github.com/ncw/dropbox-sdk-go-unofficial"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/boltdb/bolt"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/patrickmn/go-cache"

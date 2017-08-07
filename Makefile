@@ -18,6 +18,10 @@ rclone:
 	go install -v --ldflags "-s -X github.com/ncw/rclone/fs.Version=$(TAG)" $(BUILDTAGS)
 	cp -av `go env GOPATH`/bin/rclone .
 
+rclone_linux:
+	env GOOS=linux GOARCH=amd64 go build --ldflags "-s -X github.com/ncw/rclone/fs.Version=$(TAG)" $(BUILDTAGS)
+	cp -av ./rclone ~/work/github/plexdrive-vagrant/bin/
+
 vars:
 	@echo SHELL="'$(SHELL)'"
 	@echo TAG="'$(TAG)'"

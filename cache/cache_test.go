@@ -7,13 +7,13 @@ package cache_test
 import (
 	"testing"
 
-	"github.com/remusb/rclone/cache"
+	"github.com/ncw/rclone/cache"
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fstest/fstests"
 )
 
 func TestSetup(t *testing.T) {
-	fstests.NilObject = fs.Object((*cache.Object)(nil))
+	fstests.NilObject = fs.Object((*cache.CachedObject)(nil))
 	fstests.RemoteName = "TestCache:"
 }
 

@@ -37,6 +37,12 @@ func (ce *CachedDirEntries) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	// check if the cache is expired and fail the conversion if it is
+	expiresAt := ce.CacheTs.Add(ce.CacheFs.listAge)
+	if time.Now().After(expiresAt) {
+		return errors.New("expired dir list")
+	}
+
 	// Let's add a place to store our de-serialized objects
 	ce.DirEntries = make(fs.DirEntries, len(rawDirEntries))
 
@@ -124,6 +130,27 @@ func (ce *CachedDirEntries) AddEntries(de fs.DirEntries) {
 	ce.DirEntries = dirEntries
 }
 
+func (ce *CachedDirEntries) AddItem(e fs.DirEntry) {
+	switch e.(type) {
+	case fs.Object:
+		ce.DirEntries = append(ce.DirEntries, NewCachedObject(ce.CacheFs, e.(fs.Object)))
+	case fs.Directory:
+		ce.DirEntries = append(ce.DirEntries, NewCachedDirectory(ce.CacheFs, e.(fs.Directory)))
+	}
+}
+
+func (ce *CachedDirEntries) RemoveItem(e fs.DirEntry) {
+	var dirEntries fs.DirEntries
+
+	for _, entry := range ce.DirEntries {
+		if entry.Remote() != e.Remote() {
+			dirEntries = append(dirEntries, entry)
+		}
+	}
+
+	ce.DirEntries = dirEntries
+}
+
 // this exports from a cache store to a generic one
 func (ce *CachedDirEntries) toDirEntries() fs.DirEntries {
 	var dirEntries fs.DirEntries
@@ -162,6 +189,20 @@ func NewCachedDirectory(f *Fs, d fs.Directory) *CachedDirectory {
 		CacheItems:   d.Items(),
 		CacheType:		"Directory",
 		CacheTs:			time.Now(),
+	}
+}
+
+// build one from a generic fs.Directory
+func NewEmptyCachedDirectory(f *Fs, remote string) *CachedDirectory {
+	return &CachedDirectory{
+		CacheFs:       	f,
+		CacheString:  	remote,
+		CacheRemote:  	remote,
+		CacheModTime: 	time.Now(),
+		CacheSize:    	0,
+		CacheItems:   	0,
+		CacheType:			"Directory",
+		CacheTs:				time.Now(),
 	}
 }
 
