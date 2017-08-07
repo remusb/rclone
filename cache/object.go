@@ -5,13 +5,13 @@ import (
 	"time"
 	"io"
 	"errors"
-	"path"
-	"math"
+	"sync"
 )
 
 // a generic file like object that stores basic information about it
 type CachedObject struct {
 	fs.Object									`json:"-"`
+	fs.ObjectUnbuffered				`json:"-"`
 
 	CacheFs				*Fs					`json:"-"`				// cache fs
 	CacheString		string			`json:"string"`		// name
@@ -23,11 +23,14 @@ type CachedObject struct {
 	CacheHashes	 map[fs.HashType]string	`json:"hashes"`		// all supported hashes cached
 	CacheType		 string 				`json:"cacheType"`
 	CacheTs			 time.Time			`json:"cacheTs"`	// cache timestamp
+
+	sourceMutex	sync.Mutex
+	cacheManager *Manager
 }
 
 // build one from a generic fs.Object
 func NewCachedObject(f *Fs, o fs.Object) *CachedObject {
-	return &CachedObject{
+	co := &CachedObject{
 		Object:				o,
 		CacheFs:       f,
 		CacheString:   o.String(),
@@ -38,6 +41,10 @@ func NewCachedObject(f *Fs, o fs.Object) *CachedObject {
 		CacheType:		"Object",
 		CacheTs:			time.Now(),
 	}
+
+	co.cacheManager = NewManager(co)
+
+	return co
 }
 
 func (o *CachedObject) Fs() fs.Info {
@@ -70,10 +77,13 @@ func (o *CachedObject) Storable() bool {
 
 // this requests the original FS for the object in case it comes from a cached entry
 func (o *CachedObject) RefreshObject() error {
+	o.sourceMutex.Lock()
+	defer o.sourceMutex.Unlock()
+
 	liveObject, err := o.CacheFs.Fs.NewObject(o.Remote())
 
 	if err != nil {
-		fs.Errorf("cache", "Couldn't find source object (%v): %v", o.Remote(), err)
+		fs.Errorf("cache", "couldn't find source object (%v): %v", o.Remote(), err)
 		return err
 	}
 
@@ -91,132 +101,47 @@ func (o *CachedObject) SetModTime(t time.Time) error {
 	err := o.CacheFs.cache.ObjectPut(o)
 	if err != nil {
 		// TODO ignore cache failure
-		fs.Errorf("cache", "Couldn't cache object hash [%v]: %v", o.Remote(), err)
+		fs.Errorf("cache", "couldn't cache object hash [%v]: %v", o.Remote(), err)
 	}
 
 	return o.Object.SetModTime(t)
 }
 
-func (o *CachedObject) CacheOpen(offset int64, writer *io.PipeWriter) {
-	chunkSize := o.CacheFs.chunkSize
-	// index for start offset of every chunk (starts from requested offset)
-	chunkOffset := offset
-
-	fs.Errorf("cache", "info: object opened (%v:%v)", path.Base(o.Remote()), chunkOffset)
-
-	for {
-		var readBytes []byte
-		var totalReadBytes int64
-		var err error
-
-		// we calculate the modulus of the requested offset with the size of a chunk
-		offsetMod := int64(math.Mod(float64(chunkOffset), float64(chunkSize)))
-
-		// we align the start offset of the first chunk to a likely chunk in the storage
-		// if it's 0, even better, nothing changes
-		// if it's >0, we'll read from the start of the chunk and we'll need to trim the offsetMod bytes from it after EOF
-		if offsetMod > 0 {
-			chunkOffset = chunkOffset - offsetMod
-		}
-
-		fs.Errorf("cache", "info: chunk needed (%v): %v", path.Base(o.Remote()), chunkOffset)
-
-		// search for cached data
-		readBytes, err = o.CacheFs.Cache().ObjectDataGet(o, chunkOffset)
-
-		// something wrong with reading from cache or it simply doesn't exist
-		if err != nil {
-			if o.Object == nil {
-				o.RefreshObject()
-			}
-
-			// Here we add an option for the wrapping FS that we want a chunk of the file
-			rangeOption := &fs.RangeOption{
-				Start: chunkOffset,
-				End: chunkOffset + chunkSize,
-			}
-
-			// open file at desired offset
-			rc, err := o.Object.Open(&fs.SeekOption{ Offset: chunkOffset }, rangeOption)
-			// if something went wrong, we need to close the writer
-			if err != nil {
-				fs.Errorf("cache", "info: object open failed (%v): %v", path.Base(o.Remote()), err)
-				writer.CloseWithError(err)
-				break
-			}
-
-			// read the data from source and close that reader
-			readBytes = make([]byte, chunkSize)
-			c, err := rc.Read(readBytes)
-			totalReadBytes = int64(c)
-			rc.Close()
-
-			// if we can't read from source we abort
-			if err != nil {
-				fs.Errorf("cache", "info: object read error (%v)", path.Base(o.Remote()), err)
-				writer.CloseWithError(err)
-				break
-			}
-
-			// cache the copy
-			err = o.CacheFs.Cache().ObjectDataPut(o, readBytes, chunkOffset)
-			if err != nil {
-				// TODO ignore when caching fails
-				fs.Errorf("cache", "Couldn't cache chunk [%v:%v]: %+v", path.Base(o.Remote()), chunkOffset, err)
-			}
-
-			fs.Errorf("cache", "info: chunk from source (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalReadBytes))
-		} else {
-			totalReadBytes = int64(len(readBytes))
-
-			fs.Errorf("cache", "info: chunk from cache (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalReadBytes))
-		}
-
-		// align the chunk with the original chunk offset
-		if offsetMod > 0 {
-			readBytes = readBytes[offsetMod:]
-			totalReadBytes = int64(len(readBytes))
-			chunkOffset = chunkOffset + offsetMod
-			fs.Errorf("cache", "info: aligned chunk (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalReadBytes))
-		}
-
-		totalWrittenBytes, err := writer.Write(readBytes)
-		if err == io.ErrClosedPipe {
-			//fs.Errorf("cache", "info: object pipe closed already (%v)", path.Base(o.Remote()))
-			fs.Errorf("cache", "info: chunk written (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalWrittenBytes))
-			break
-		} else if err != nil {
-			fs.Errorf("cache", "info: chunk write error (%v): %v", path.Base(o.Remote()), err)
-			writer.CloseWithError(err)
-			break
-		}
-
-		fs.Errorf("cache", "info: chunk written (%v): %v-%v", path.Base(o.Remote()), chunkOffset, chunkOffset+int64(totalWrittenBytes))
-		chunkOffset = chunkOffset + int64(totalWrittenBytes)
-	}
-}
-
 func (o *CachedObject) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
-	var offset int64 = 0
+	//TODO: find a better way to lock this method
+	rangeFound := false
 
 	for _, option := range options {
-		switch x := option.(type) {
-		case *fs.SeekOption:
-			offset = x.Offset
-		default:
-			if option.Mandatory() {
-				fs.Errorf("cache", "Unsupported mandatory option: %v", option)
-			}
+		switch option.(type) {
+		case *fs.RangeOption:
+			rangeFound = true
 		}
 	}
 
-	// start a cleanup in parallel if it's time
-	//o.CacheFs.CleanUpCache()
+	if !rangeFound {
+		return nil, errors.New("can't use buffered read from source")
+	}
 
-	dstReader, dstWriter := io.Pipe()
-	go o.CacheOpen(offset, dstWriter)
+	if o.Object == nil {
+		o.RefreshObject()
+	}
 
-	return dstReader, nil
+	// otherwise read from source
+	return o.Object.Open(options...)
+}
+
+func (o *CachedObject) Read(reqSize, reqOffset int64) (respData []byte, err error) {
+	if o.Object == nil {
+		o.RefreshObject()
+	}
+
+	reqEnd := reqOffset + reqSize
+	if reqEnd > o.Object.Size() {
+		reqEnd = o.Object.Size()
+	}
+
+	go o.cacheManager.StartWorkers(reqOffset)
+	return o.cacheManager.GetChunk(reqOffset, reqEnd)
 }
 
 func (o *CachedObject) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
@@ -273,7 +198,6 @@ func (o *CachedObject) Hash(ht fs.HashType) (string, error) {
 		fs.Errorf("cache", "Couldn't get object hash (%v) from source fs (%v): %v", ht.String(), o.CacheFs.Name(), err)
 		return "", err
 	}
-	//fs.Errorf("cache", "Info: Fetched object hash (%v) from source fs (%v)", o.Remote(), o.CacheFs.Fs.Name())
 
 	o.CacheHashes[ht] = liveHash
 	o.CacheTs = time.Now()
@@ -291,4 +215,5 @@ func (o *CachedObject) Hash(ht fs.HashType) (string, error) {
 
 var (
 	_ fs.Object         	= (*CachedObject)(nil)
+	_ fs.ObjectUnbuffered = (*CachedObject)(nil)
 )

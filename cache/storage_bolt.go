@@ -24,7 +24,6 @@ const (
 	TsBucket = "ts"
 )
 
-// Fs represents a wrapped fs.Fs
 type Bolt struct {
 	Storage
 
@@ -76,7 +75,7 @@ func (b *Bolt) ListGet(dir string, cachedEntries *CachedDirEntries) error {
 	err := b.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(ListBucket))
 		if bucket == nil {
-			return errors.Errorf("Couldn't open bucket (%v)", ListBucket)
+			return errors.Errorf("couldn't open bucket (%v)", ListBucket)
 		}
 
 		val := bucket.Get([]byte(dir))
@@ -84,8 +83,10 @@ func (b *Bolt) ListGet(dir string, cachedEntries *CachedDirEntries) error {
 			err := json.Unmarshal(val, &cachedEntries)
 
 			if err != nil {
-				return errors.Errorf("Couldn't unmarshal directory (%v) entries: %v", dir, err)
+				return errors.Errorf("couldn't unmarshal directory (%v) entries: %v", dir, err)
 			}
+		} else {
+			return errors.Errorf("dir not found: %v", dir)
 		}
 
 		return nil
@@ -98,17 +99,17 @@ func (b *Bolt) ListPut(dir string, entries *CachedDirEntries) error {
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists([]byte(ListBucket))
 		if err != nil {
-			return errors.Errorf("Couldn't open or create bucket (%v): %v", ListBucket, err)
+			return errors.Errorf("couldn't open or create bucket (%v): %v", ListBucket, err)
 		}
 
 		encoded, err := json.Marshal(entries)
 		if err != nil {
-			return errors.Errorf("Couldn't marshal directory (%v) entries: %v", dir, err)
+			return errors.Errorf("couldn't marshal directory (%v) entries: %v", dir, err)
 		}
 
 		err = bucket.Put([]byte(dir), encoded)
 		if err != nil {
-			return errors.Errorf("Couldn't store directory (%v) entries : %v", dir, err)
+			return errors.Errorf("couldn't store directory (%v) entries : %v", dir, err)
 		}
 
 		return nil
@@ -120,9 +121,11 @@ func (b *Bolt) ListPut(dir string, entries *CachedDirEntries) error {
 func (b *Bolt) ListRemove(dir string) error {
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		prefix := []byte(dir)
+
+		// delete from dir listings
 		bucket, err := tx.CreateBucketIfNotExists([]byte(ListBucket))
 		if err != nil {
-			return errors.Errorf("Couldn't open or create bucket (%v): %v", ListBucket, err)
+			return errors.Errorf("couldn't open or create bucket (%v): %v", ListBucket, err)
 		}
 
 		c := bucket.Cursor()
@@ -130,9 +133,10 @@ func (b *Bolt) ListRemove(dir string) error {
 			c.Delete()
 		}
 
+		// remove all object infos from that dir
 		bucket = tx.Bucket([]byte(InfoBucket))
 		if bucket == nil {
-			return errors.Errorf("Couldn't open (%v) bucket", InfoBucket)
+			return errors.Errorf("couldn't open (%v) bucket", InfoBucket)
 		}
 
 		c = bucket.Cursor()
@@ -140,9 +144,10 @@ func (b *Bolt) ListRemove(dir string) error {
 			c.Delete()
 		}
 
+		// remove all cached chunks from objects in that dir
 		bucket = tx.Bucket([]byte(DataBucket))
 		if bucket == nil {
-			return errors.Errorf("Couldn't open (%v) bucket", DataBucket)
+			return errors.Errorf("couldn't open (%v) bucket", DataBucket)
 		}
 
 		c = bucket.Cursor()
@@ -160,17 +165,15 @@ func (b *Bolt) ObjectGet(path string) (cachedObject *CachedObject, err error) {
 	err = b.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(InfoBucket))
 		if bucket == nil {
-			return errors.Errorf("Couldn't open (%v) bucket", InfoBucket)
+			return errors.Errorf("couldn't open (%v) bucket", InfoBucket)
 		}
 
 		val := bucket.Get([]byte(path))
-		fs.Errorf("bolt", "Raw cached object (%v): %+v", path, string(val[:]))
-
 		if val != nil {
 			return json.Unmarshal(val, &cachedObject)
 		}
 
-		return errors.Errorf("Couldn't find object (%v)", path)
+		return errors.Errorf("couldn't find object (%v)", path)
 	})
 
 	if err != nil {
@@ -187,18 +190,18 @@ func (b *Bolt) ObjectPut(cachedObject *CachedObject) error {
 		// create object bucket
 		bucket, err := tx.CreateBucketIfNotExists([]byte(InfoBucket))
 		if err != nil {
-			return errors.Errorf("Couldn't create (%v) bucket: %v", InfoBucket, err)
+			return errors.Errorf("couldn't create (%v) bucket: %v", InfoBucket, err)
 		}
 
 		// cache Object Info
 		encoded, err := json.Marshal(cachedObject)
 		if err != nil {
-			return errors.Errorf("Couldn't marshal object (%v) info: %v", path, err)
+			return errors.Errorf("couldn't marshal object (%v) info: %v", path, err)
 		}
 
 		err = bucket.Put([]byte(path), []byte(encoded))
 		if err != nil {
-			return errors.Errorf("Couldn't cache object (%v) info: %v", path, err)
+			return errors.Errorf("couldn't cache object (%v) info: %v", path, err)
 		}
 
 		return nil
@@ -207,28 +210,23 @@ func (b *Bolt) ObjectPut(cachedObject *CachedObject) error {
 	return err
 }
 
-// TODO invalidate cached listing that contains the deleted entry
 func (b *Bolt) ObjectRemove(cachedObject *CachedObject) error {
 	path := cachedObject.Remote()
 
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(InfoBucket))
 		if bucket == nil {
-			return errors.Errorf("Couldn't open (%v) bucket", InfoBucket)
+			return errors.Errorf("couldn't open (%v) bucket", InfoBucket)
 		}
 
-		err := bucket.Delete([]byte(path))
-		if err != nil {
-			fs.Errorf("bolt", "Couldn't delete file info (%v): %+v", path, err)
-		}
+		bucket.Delete([]byte(path))
 
 		bucket = tx.Bucket([]byte(DataBucket))
 		if bucket == nil {
-			return errors.Errorf("Couldn't open (%v) bucket", DataBucket)
+			return errors.Errorf("couldn't open (%v) bucket", DataBucket)
 		}
 
-		_ = bucket.DeleteBucket([]byte(path))
-		fs.Errorf("bolt", "info: deleted object (%v)", path)
+		bucket.DeleteBucket([]byte(path))
 
 		return nil
 	})
@@ -249,27 +247,48 @@ func (b *Bolt) objectDataTs(tx *bolt.Tx, path string, offset int64) {
 	}
 
 	ts := itob(time.Now().UnixNano())
-	err := tsBucket.Put([]byte(ts), []byte(tsVal))
-	if err != nil {
-		// TODO: Ignore ts update?
-		fs.Errorf("bolt", "Couldn't update ts of cache object (%v): %v", path, err)
-	}
+	tsBucket.Put([]byte(ts), []byte(tsVal))
 }
 
-func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) (data []byte, err error) {
+// TODO: if we're checking and got the data, we should precache it in the RAM too
+func (b *Bolt) ObjectDataExists(cachedObject *CachedObject, offset int64) bool {
 	path := cachedObject.Remote()
 
-	err = b.db.View(func(tx *bolt.Tx) error {
+	err := b.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(DataBucket)).Bucket([]byte(path))
 		if bucket == nil {
-			return errors.Errorf("Couldn't open (%v.%v) bucket", DataBucket, path)
+			return errors.Errorf("couldn't open (%v.%v) bucket", DataBucket, path)
 		}
 
 		val := bucket.Get(itob(offset))
 		if val == nil {
-			return errors.Errorf("Couldn't get cached object data (%v) at offset %v", path, offset)
+			return errors.Errorf("couldn't get cached object data (%v) at offset %v", path, offset)
 		}
-		data = cloneBytes(val)
+
+		return nil
+	})
+
+	if err != nil {
+		return false
+	}
+
+	return true
+}
+
+func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) ([]byte, error) {
+	path := cachedObject.Remote()
+	var data []byte
+
+	err := b.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(DataBucket)).Bucket([]byte(path))
+		if bucket == nil {
+			return errors.Errorf("couldn't open (%v.%v) bucket", DataBucket, path)
+		}
+
+		data = bucket.Get(itob(offset))
+		if data == nil {
+			return errors.Errorf("couldn't get cached object data (%v) at offset %v", path, offset)
+		}
 
 		return nil
 	})
@@ -278,7 +297,7 @@ func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) (data []b
 		return nil, err
 	}
 
-	go b.db.Batch(func(tx *bolt.Tx) error {
+	b.db.Batch(func(tx *bolt.Tx) error {
 		b.cleanupMux.Lock()
 		defer b.cleanupMux.Unlock()
 
@@ -287,7 +306,7 @@ func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) (data []b
 		return nil
 	})
 
-	return data, err
+	return data, nil
 }
 
 func (b *Bolt) ObjectDataPut(cachedObject *CachedObject, data []byte, offset int64) error {
@@ -296,18 +315,22 @@ func (b *Bolt) ObjectDataPut(cachedObject *CachedObject, data []byte, offset int
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		bucket, err := tx.Bucket([]byte(DataBucket)).CreateBucketIfNotExists([]byte(path))
 		if err != nil || bucket == nil {
-			return errors.Errorf("Couldn't open (%v) bucket: %+v", path, err)
+			return errors.Errorf("couldn't open (%v) bucket: %+v", path, err)
 		}
 
 		err = bucket.Put(itob(offset), data)
 		if err != nil {
-			return errors.Errorf("Couldn't cache object data (%v) at offset %v", path, offset)
+			return errors.Errorf("couldn't cache object data (%v) at offset %v", path, offset)
 		}
 
 		return nil
 	})
 
-	go b.db.Batch(func(tx *bolt.Tx) error {
+	if err != nil {
+		return err
+	}
+
+	b.db.Batch(func(tx *bolt.Tx) error {
 		b.cleanupMux.Lock()
 		defer b.cleanupMux.Unlock()
 
@@ -387,17 +410,17 @@ func (b *Bolt) Stats() {
 
 		statsBucket, err := tx.CreateBucketIfNotExists([]byte(StatsBucket))
 		if err != nil {
-			return errors.Errorf("Couldn't open (%v) bucket", StatsBucket)
+			return errors.Errorf("couldn't open (%v) bucket", StatsBucket)
 		}
 
 		dataBucket := tx.Bucket([]byte(DataBucket))
 		if dataBucket == nil {
-			return errors.Errorf("Couldn't open (%v) bucket", DataBucket)
+			return errors.Errorf("couldn't open (%v) bucket", DataBucket)
 		}
 		//dataStats := dataBucket.Stats()
 		listBucket := tx.Bucket([]byte(ListBucket))
 		if listBucket == nil {
-			return errors.Errorf("Couldn't open (%v) bucket", ListBucket)
+			return errors.Errorf("couldn't open (%v) bucket", ListBucket)
 		}
 		listStats := listBucket.Stats()
 
@@ -426,14 +449,14 @@ func (b *Bolt) Stats() {
 
 		encoded, err := json.Marshal(stats)
 		if err != nil {
-			return errors.Errorf("Couldn't marshal stats (%+v): %v", stats, err)
+			return errors.Errorf("couldn't marshal stats (%+v): %v", stats, err)
 		}
 
 		ts := time.Now().Format(time.RFC3339)
 		err = statsBucket.Put([]byte(ts), encoded)
 		if err != nil {
 			// TODO: Ignore stats update?
-			fs.Errorf("bolt", "Couldn't add db stats (%v): %v", ts, err)
+			fs.Errorf("bolt", "couldn't add db stats (%v): %v", ts, err)
 		}
 
 		fs.Errorf("bolt", "info: DB STATS %v:\n%+v", ts, stats)
