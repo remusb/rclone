@@ -13,12 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"path"
 )
 
 // Constants
 const (
 	ListBucket = "ls"
-	InfoBucket = "info"
 	DataBucket = "data"
 	StatsBucket = "stats"
 	TsBucket = "ts"
@@ -29,13 +29,15 @@ type Bolt struct {
 
 	dbPath 				string
 	db   					*bolt.DB
+	fs						*Fs
 	cleanupMux 		sync.Mutex
 }
 
 // NewFs contstructs an Fs from the path, container:path
-func NewBolt(dbPath string) *Bolt {
+func NewBolt(dbPath string, fs *Fs) *Bolt {
 	return &Bolt{
 		dbPath: dbPath,
+		fs: fs,
 	}
 }
 
@@ -50,8 +52,7 @@ func (b *Bolt) Connect(refreshDb bool) error {
 	}
 
 	_ = db.Update(func(tx *bolt.Tx) error {
-		_, _ = tx.CreateBucketIfNotExists([]byte(ListBucket))
-		_, _ = tx.CreateBucketIfNotExists([]byte(InfoBucket))
+		//_, _ = tx.CreateBucketIfNotExists([]byte(ListBucket))
 		_, _ = tx.CreateBucketIfNotExists([]byte(DataBucket))
 		_, _ = tx.CreateBucketIfNotExists([]byte(TsBucket))
 
@@ -71,78 +72,126 @@ func (b *Bolt) Purge() {
 	b.Connect(true)
 }
 
-func (b *Bolt) ListGet(dir string, cachedEntries *CachedDirEntries) error {
-	err := b.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(ListBucket))
-		if bucket == nil {
-			return errors.Errorf("couldn't open bucket (%v)", ListBucket)
-		}
+func (b *Bolt) GetBucket(dir string, createIfMissing bool, tx *bolt.Tx) *bolt.Bucket {
+	if dir == "." { // empty cleaned paths in Go mean .
+		dir = ""
+	}
 
-		val := bucket.Get([]byte(dir))
-		if val != nil {
-			err := json.Unmarshal(val, &cachedEntries)
+	entries := strings.FieldsFunc(dir, func(c rune) bool {
+		return os.PathSeparator == c
+	})
 
-			if err != nil {
-				return errors.Errorf("couldn't unmarshal directory (%v) entries: %v", dir, err)
-			}
+	fs.Errorf("cache", "Split %v dir in %v", dir, entries)
+
+	var bucket *bolt.Bucket
+	if createIfMissing {
+		bucket, _ = tx.CreateBucketIfNotExists([]byte(ListBucket))
+	} else {
+		bucket = tx.Bucket([]byte(ListBucket))
+	}
+	if bucket == nil {
+		return nil
+	}
+
+	for _, entry := range entries {
+		if createIfMissing {
+			bucket, _ = bucket.CreateBucketIfNotExists([]byte(entry))
 		} else {
-			return errors.Errorf("dir not found: %v", dir)
+			bucket = bucket.Bucket([]byte(entry))
 		}
 
-		return nil
-	})
+		if bucket == nil {
+			return nil
+		}
+	}
 
-	return err
+	return bucket
 }
 
-func (b *Bolt) ListPut(dir string, entries *CachedDirEntries) error {
-	err := b.db.Update(func(tx *bolt.Tx) error {
-		bucket, err := tx.CreateBucketIfNotExists([]byte(ListBucket))
-		if err != nil {
-			return errors.Errorf("couldn't open or create bucket (%v): %v", ListBucket, err)
-		}
+func (b *Bolt) GetDir(dir string) (fs.DirEntries, error) {
+	var dirEntries fs.DirEntries
 
-		encoded, err := json.Marshal(entries)
-		if err != nil {
-			return errors.Errorf("couldn't marshal directory (%v) entries: %v", dir, err)
-		}
-
-		err = bucket.Put([]byte(dir), encoded)
-		if err != nil {
-			return errors.Errorf("couldn't store directory (%v) entries : %v", dir, err)
-		}
-
-		return nil
-	})
-
-	return err
-}
-
-func (b *Bolt) ListRemove(dir string) error {
-	err := b.db.Update(func(tx *bolt.Tx) error {
-		prefix := []byte(dir)
-
-		// delete from dir listings
-		bucket, err := tx.CreateBucketIfNotExists([]byte(ListBucket))
-		if err != nil {
-			return errors.Errorf("couldn't open or create bucket (%v): %v", ListBucket, err)
+	err := b.db.View(func(tx *bolt.Tx) error {
+		bucket := b.GetBucket(path.Clean(dir), false, tx)
+		if bucket == nil {
+			return errors.Errorf("couldn't open bucket (%v)", dir)
 		}
 
 		c := bucket.Cursor()
-		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
-			c.Delete()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if v == nil { // directory
+				var d CachedDirectory
+				d.CacheFs = b.fs
+
+				dirEntries = append(dirEntries, &d)
+			} else { // object
+				var o CachedObject
+				err := json.Unmarshal(v, &o)
+				if err != nil {
+					fs.Errorf(b.fs, "error during unmarshalling obj (%v)", dir)
+				}
+				o.CacheFs = b.fs
+
+				dirEntries = append(dirEntries, &o)
+			}
 		}
 
-		// remove all object infos from that dir
-		bucket = tx.Bucket([]byte(InfoBucket))
+		return nil
+	})
+
+	return dirEntries, err
+}
+
+func (b *Bolt) AddDir(dir string, entries fs.DirEntries) (fs.DirEntries, error) {
+	var cachedEntries fs.DirEntries
+
+	err := b.db.Update(func(tx *bolt.Tx) error {
+		bucket := b.GetBucket(path.Clean(dir), true, tx)
 		if bucket == nil {
-			return errors.Errorf("couldn't open (%v) bucket", InfoBucket)
+			return errors.Errorf("couldn't open bucket (%v)", dir)
 		}
 
-		c = bucket.Cursor()
-		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
-			c.Delete()
+		for _, entry := range entries {
+			switch o := entry.(type) {
+			case fs.Object:
+				co := NewCachedObject(b.fs, o)
+
+				encoded, err := json.Marshal(co)
+				if err != nil {
+					return errors.Errorf("couldn't marshal object (%v): %v", co, err)
+				}
+
+				err = bucket.Put([]byte(path.Base(co.Remote())), encoded)
+				if err != nil {
+					return errors.Errorf("couldn't store object (%v) : %v", co, err)
+				}
+
+				cachedEntries = append(cachedEntries, co)
+			case fs.Directory:
+				cd := NewCachedDirectory(b.fs, o)
+				bucket.CreateBucketIfNotExists([]byte(path.Base(cd.Remote())))
+				cachedEntries = append(cachedEntries, cd)
+			default:
+				return errors.Errorf("Unknown object type %T", entry)
+			}
 		}
+
+		return nil
+	})
+
+	return cachedEntries, err
+}
+
+func (b *Bolt) RemoveDir(p string) error {
+	err := b.db.Update(func(tx *bolt.Tx) error {
+		parent, dirName := path.Split(p)
+
+		bucket := b.GetBucket(parent, false, tx)
+		if bucket == nil {
+			return errors.Errorf("couldn't open bucket (%v)", p)
+		}
+
+		bucket.DeleteBucket([]byte(dirName))
 
 		// remove all cached chunks from objects in that dir
 		bucket = tx.Bucket([]byte(DataBucket))
@@ -150,8 +199,8 @@ func (b *Bolt) ListRemove(dir string) error {
 			return errors.Errorf("couldn't open (%v) bucket", DataBucket)
 		}
 
-		c = bucket.Cursor()
-		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+		c := bucket.Cursor()
+		for k, _ := c.Seek([]byte(path.Clean(p))); k != nil && bytes.HasPrefix(k, []byte(path.Clean(p))); k, _ = c.Next() {
 			c.Delete()
 		}
 
@@ -161,19 +210,21 @@ func (b *Bolt) ListRemove(dir string) error {
 	return err
 }
 
-func (b *Bolt) ObjectGet(path string) (cachedObject *CachedObject, err error) {
+func (b *Bolt) GetObject(p string) (cachedObject *CachedObject, err error) {
+	parent, obj := path.Split(p)
+
 	err = b.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(InfoBucket))
+		bucket := b.GetBucket(parent, false, tx)
 		if bucket == nil {
-			return errors.Errorf("couldn't open (%v) bucket", InfoBucket)
+			return errors.Errorf("couldn't open parent bucket for %v", p)
 		}
 
-		val := bucket.Get([]byte(path))
+		val := bucket.Get([]byte(obj))
 		if val != nil {
 			return json.Unmarshal(val, &cachedObject)
 		}
 
-		return errors.Errorf("couldn't find object (%v)", path)
+		return errors.Errorf("couldn't find object (%v)", p)
 	})
 
 	if err != nil {
@@ -183,25 +234,24 @@ func (b *Bolt) ObjectGet(path string) (cachedObject *CachedObject, err error) {
 	return cachedObject, err
 }
 
-func (b *Bolt) ObjectPut(cachedObject *CachedObject) error {
-	path := cachedObject.Remote()
+func (b *Bolt) AddObject(cachedObject *CachedObject) error {
+	parent, obj := path.Split(cachedObject.Remote())
 
-	err := b.db.Batch(func(tx *bolt.Tx) error {
-		// create object bucket
-		bucket, err := tx.CreateBucketIfNotExists([]byte(InfoBucket))
-		if err != nil {
-			return errors.Errorf("couldn't create (%v) bucket: %v", InfoBucket, err)
+	err := b.db.Update(func(tx *bolt.Tx) error {
+		bucket := b.GetBucket(parent, true, tx)
+		if bucket == nil {
+			return errors.Errorf("couldn't open parent bucket for %v", parent)
 		}
 
 		// cache Object Info
 		encoded, err := json.Marshal(cachedObject)
 		if err != nil {
-			return errors.Errorf("couldn't marshal object (%v) info: %v", path, err)
+			return errors.Errorf("couldn't marshal object (%v) info: %v", cachedObject, err)
 		}
 
-		err = bucket.Put([]byte(path), []byte(encoded))
+		err = bucket.Put([]byte(obj), []byte(encoded))
 		if err != nil {
-			return errors.Errorf("couldn't cache object (%v) info: %v", path, err)
+			return errors.Errorf("couldn't cache object (%v) info: %v", cachedObject, err)
 		}
 
 		return nil
@@ -210,23 +260,23 @@ func (b *Bolt) ObjectPut(cachedObject *CachedObject) error {
 	return err
 }
 
-func (b *Bolt) ObjectRemove(cachedObject *CachedObject) error {
-	path := cachedObject.Remote()
+func (b *Bolt) RemoveObject(cachedObject *CachedObject) error {
+	parent, obj := path.Split(cachedObject.Remote())
 
 	err := b.db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(InfoBucket))
+		bucket := b.GetBucket(parent, false, tx)
 		if bucket == nil {
-			return errors.Errorf("couldn't open (%v) bucket", InfoBucket)
+			return errors.Errorf("couldn't open parent bucket for %v", parent)
 		}
 
-		bucket.Delete([]byte(path))
+		bucket.Delete([]byte(obj))
 
 		bucket = tx.Bucket([]byte(DataBucket))
 		if bucket == nil {
 			return errors.Errorf("couldn't open (%v) bucket", DataBucket)
 		}
 
-		bucket.DeleteBucket([]byte(path))
+		bucket.DeleteBucket([]byte(parent))
 
 		return nil
 	})
@@ -234,7 +284,7 @@ func (b *Bolt) ObjectRemove(cachedObject *CachedObject) error {
 	return err
 }
 
-func (b *Bolt) objectDataTs(tx *bolt.Tx, path string, offset int64) {
+func (b *Bolt) updateChunkTs(tx *bolt.Tx, path string, offset int64) {
 	tsBucket := tx.Bucket([]byte(TsBucket))
 	tsVal := path + "-" + strconv.FormatInt(offset, 10)
 
@@ -250,9 +300,8 @@ func (b *Bolt) objectDataTs(tx *bolt.Tx, path string, offset int64) {
 	tsBucket.Put([]byte(ts), []byte(tsVal))
 }
 
-// TODO: if we're checking and got the data, we should precache it in the RAM too
-func (b *Bolt) ObjectDataExists(cachedObject *CachedObject, offset int64) bool {
-	path := cachedObject.Remote()
+func (b *Bolt) HasChunk(cachedObject *CachedObject, offset int64) bool {
+	path := path.Clean(cachedObject.Remote())
 
 	err := b.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(DataBucket)).Bucket([]byte(path))
@@ -275,8 +324,8 @@ func (b *Bolt) ObjectDataExists(cachedObject *CachedObject, offset int64) bool {
 	return true
 }
 
-func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) ([]byte, error) {
-	path := cachedObject.Remote()
+func (b *Bolt) GetChunk(cachedObject *CachedObject, offset int64) ([]byte, error) {
+	path := path.Clean(cachedObject.Remote())
 	var data []byte
 
 	err := b.db.View(func(tx *bolt.Tx) error {
@@ -302,15 +351,15 @@ func (b *Bolt) ObjectDataGet(cachedObject *CachedObject, offset int64) ([]byte, 
 		defer b.cleanupMux.Unlock()
 
 		// save touch ts for the newly cached piece
-		b.objectDataTs(tx, path, offset)
+		b.updateChunkTs(tx, path, offset)
 		return nil
 	})
 
 	return data, nil
 }
 
-func (b *Bolt) ObjectDataPut(cachedObject *CachedObject, data []byte, offset int64) error {
-	path := cachedObject.Remote()
+func (b *Bolt) AddChunk(cachedObject *CachedObject, data []byte, offset int64) error {
+	path := path.Clean(cachedObject.Remote())
 
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		bucket, err := tx.Bucket([]byte(DataBucket)).CreateBucketIfNotExists([]byte(path))
@@ -335,14 +384,14 @@ func (b *Bolt) ObjectDataPut(cachedObject *CachedObject, data []byte, offset int
 		defer b.cleanupMux.Unlock()
 
 		// save touch ts for the newly cached piece
-		b.objectDataTs(tx, path, offset)
+		b.updateChunkTs(tx, path, offset)
 		return nil
 	})
 
 	return err
 }
 
-func (b *Bolt) ObjectDataClean(chunkAge time.Duration) {
+func (b *Bolt) CleanChunks(chunkAge time.Duration) {
 	go b.db.Batch(func(tx *bolt.Tx) error {
 		b.cleanupMux.Lock()
 		defer b.cleanupMux.Unlock()

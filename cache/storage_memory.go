@@ -26,7 +26,7 @@ func (m *Memory) Connect() error {
 	return nil
 }
 
-func (m *Memory) ObjectDataExists(cachedObject *CachedObject, offset int64) bool {
+func (m *Memory) HasChunk(cachedObject *CachedObject, offset int64) bool {
 	key := cachedObject.Remote() + "-" + strconv.FormatInt(offset, 10)
 
 	_, found := m.db.Get(key)
@@ -34,7 +34,7 @@ func (m *Memory) ObjectDataExists(cachedObject *CachedObject, offset int64) bool
 	return found
 }
 
-func (m *Memory) ObjectDataGet(cachedObject *CachedObject, offset int64) ([]byte, error) {
+func (m *Memory) GetChunk(cachedObject *CachedObject, offset int64) ([]byte, error) {
 	key := cachedObject.Remote() + "-" + strconv.FormatInt(offset, 10)
 	var data []byte
 
@@ -47,7 +47,7 @@ func (m *Memory) ObjectDataGet(cachedObject *CachedObject, offset int64) ([]byte
 	return nil, errors.Errorf("couldn't get cached object data at offset %v", offset)
 }
 
-func (m *Memory) ObjectDataPut(cachedObject *CachedObject, data []byte, offset int64) error {
+func (m *Memory) AddChunk(cachedObject *CachedObject, data []byte, offset int64) error {
 	key := cachedObject.Remote() + "-" + strconv.FormatInt(offset, 10)
 
 	m.db.Set(key, data, cache.DefaultExpiration)

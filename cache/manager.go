@@ -10,8 +10,6 @@ import (
 	"github.com/pkg/errors"
 )
 
-//type SeekInSource func(chunkStart int64, chunkEnd int64) ([]byte, error)
-
 type Manager struct {
 	CachedObject		*CachedObject
 	FileName				string
@@ -86,8 +84,8 @@ func (m *Manager) DownloadWorker(chunkStart int64) {
 	reader.Read(data)
 	reader.Close()
 
-	//m.Memory().ObjectDataPut(m.CachedObject, data, chunkStart)
-	m.Storage().ObjectDataPut(m.CachedObject, data, chunkStart)
+	m.Memory().AddChunk(m.CachedObject, data, chunkStart)
+	m.Storage().AddChunk(m.CachedObject, data, chunkStart)
 }
 
 func (m *Manager) StartWorkers(chunkStart int64) {
@@ -110,7 +108,7 @@ func (m *Manager) StartWorkers(chunkStart int64) {
 		}
 
 		// search the storage queue
-		if m.Memory().ObjectDataExists(m.CachedObject, newOffset) || m.Storage().ObjectDataExists(m.CachedObject, newOffset) {
+		if m.Memory().HasChunk(m.CachedObject, newOffset) || m.Storage().HasChunk(m.CachedObject, newOffset) {
 			workers++
 			continue
 		}
@@ -146,7 +144,7 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 		}
 
 		found := false
-		data, err = m.Memory().ObjectDataGet(m.CachedObject, chunkStart)
+		data, err = m.Memory().GetChunk(m.CachedObject, chunkStart)
 		if err == nil {
 			found = true
 			fs.Errorf(m.FileName, "info: chunk read from ram cache %v-%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(len(data)))
@@ -157,7 +155,7 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 			// we're gonna give the workers a chance to pickup the chunk
 			// and retry a couple of times
 			for i := 0; i < m.ReadRetries; i++ {
-				data, err = m.Storage().ObjectDataGet(m.CachedObject, chunkStart)
+				data, err = m.Storage().GetChunk(m.CachedObject, chunkStart)
 
 				if err == nil {
 					// store in RAM in case we need it again

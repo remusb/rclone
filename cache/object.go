@@ -80,6 +80,8 @@ func (o *CachedObject) RefreshObject() error {
 	o.sourceMutex.Lock()
 	defer o.sourceMutex.Unlock()
 
+	fs.Errorf("cache", "refreshing object %v", o.Remote())
+
 	liveObject, err := o.CacheFs.Fs.NewObject(o.Remote())
 
 	if err != nil {
@@ -98,7 +100,7 @@ func (o *CachedObject) SetModTime(t time.Time) error {
 
 	o.CacheModTime = t
 
-	err := o.CacheFs.cache.ObjectPut(o)
+	err := o.CacheFs.cache.AddObject(o)
 	if err != nil {
 		// TODO ignore cache failure
 		fs.Errorf("cache", "couldn't cache object hash [%v]: %v", o.Remote(), err)
@@ -157,7 +159,7 @@ func (o *CachedObject) Remove() error {
 	// if the object was deleted from source we can clean up the cache too
 	if (err == nil) {
 		// we delete the cache and don't care what happens with it
-		err = o.CacheFs.Cache().ObjectRemove(o)
+		err = o.CacheFs.Cache().RemoveObject(o)
 
 		if err != nil {
 			fs.Errorf("cache", "Couldn't delete object (%v) from cache: %+v", o.Remote(), err)
@@ -181,7 +183,7 @@ func (o *CachedObject) Hash(ht fs.HashType) (string, error) {
 	expiresAt := o.CacheTs.Add(o.CacheFs.fileAge)
 	if time.Now().After(expiresAt) {
 		fs.Errorf("cache", "info: object hash expired (%v)", o.Remote())
-		o.CacheFs.Cache().ObjectRemove(o)
+		o.CacheFs.Cache().RemoveObject(o)
 	} else if !found {
 		fs.Errorf("cache", "info: object hash not found (%v)", o.Remote())
 	} else {
@@ -202,7 +204,7 @@ func (o *CachedObject) Hash(ht fs.HashType) (string, error) {
 	o.CacheHashes[ht] = liveHash
 	o.CacheTs = time.Now()
 
-	err = o.CacheFs.cache.ObjectPut(o)
+	err = o.CacheFs.cache.AddObject(o)
 	if err != nil {
 		// TODO return live hash when fails?
 		fs.Errorf(o.CacheFs.Name(), "Couldn't cache object hash [%v]: %v", o.Remote(), err)
