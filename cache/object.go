@@ -30,7 +30,7 @@ type CachedObject struct {
 
 // build one from a generic fs.Object
 func NewCachedObject(f *Fs, o fs.Object) *CachedObject {
-	co := &CachedObject{
+	co := &CachedObject {
 		Object:				o,
 		CacheFs:       f,
 		CacheString:   o.String(),
@@ -76,7 +76,7 @@ func (o *CachedObject) Storable() bool {
 }
 
 // this requests the original FS for the object in case it comes from a cached entry
-func (o *CachedObject) RefreshObject() error {
+func (o *CachedObject) RefreshObject() {
 	o.sourceMutex.Lock()
 	defer o.sourceMutex.Unlock()
 
@@ -85,12 +85,11 @@ func (o *CachedObject) RefreshObject() error {
 	liveObject, err := o.CacheFs.Fs.NewObject(o.Remote())
 
 	if err != nil {
-		fs.Errorf("cache", "couldn't find source object (%v): %v", o.Remote(), err)
-		return err
+		fs.Errorf(o, "couldn't find source object: %v", err)
+		return
 	}
 
 	o.Object = liveObject
-	return nil
 }
 
 func (o *CachedObject) SetModTime(t time.Time) error {
@@ -160,7 +159,6 @@ func (o *CachedObject) Remove() error {
 	if (err == nil) {
 		// we delete the cache and don't care what happens with it
 		err = o.CacheFs.Cache().RemoveObject(o)
-
 		if err != nil {
 			fs.Errorf("cache", "Couldn't delete object (%v) from cache: %+v", o.Remote(), err)
 		} else {
@@ -183,7 +181,7 @@ func (o *CachedObject) Hash(ht fs.HashType) (string, error) {
 	expiresAt := o.CacheTs.Add(o.CacheFs.fileAge)
 	if time.Now().After(expiresAt) {
 		fs.Errorf("cache", "info: object hash expired (%v)", o.Remote())
-		o.CacheFs.Cache().RemoveObject(o)
+		_ = o.CacheFs.Cache().RemoveObject(o)
 	} else if !found {
 		fs.Errorf("cache", "info: object hash not found (%v)", o.Remote())
 	} else {

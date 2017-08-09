@@ -43,11 +43,11 @@ func (m *Manager) CacheFs() *Fs {
 	return m.CachedObject.CacheFs
 }
 
-func (m *Manager) Storage() *Bolt {
+func (m *Manager) Storage() Storage {
 	return m.CacheFs().Cache()
 }
 
-func (m *Manager) Memory() *Memory {
+func (m *Manager) Memory() ChunkStorage {
 	return m.CacheFs().Memory()
 }
 
@@ -81,11 +81,23 @@ func (m *Manager) DownloadWorker(chunkStart int64) {
 	}
 
 	data := make([]byte, chunkEnd-chunkStart)
-	reader.Read(data)
-	reader.Close()
+	_, err = reader.Read(data)
+	if err != nil {
+		fs.Errorf(m.FileName, "failed to read chunk %v: %v", chunkStart, err)
+	}
+	err = reader.Close()
+	if err != nil {
+		fs.Debugf(m.FileName, "failed to close reader for %v: %v", chunkStart, err)
+	}
 
-	m.Memory().AddChunk(m.CachedObject, data, chunkStart)
-	m.Storage().AddChunk(m.CachedObject, data, chunkStart)
+	err = m.Memory().AddChunk(m.CachedObject, data, chunkStart)
+	if err != nil {
+		fs.Debugf(m.FileName, "failed cache chunk in ram %v: %v", chunkStart, err)
+	}
+	err = m.Storage().AddChunk(m.CachedObject, data, chunkStart)
+	if err != nil {
+		fs.Debugf(m.FileName, "failed cache chunk in storage %v: %v", chunkStart, err)
+	}
 }
 
 func (m *Manager) StartWorkers(chunkStart int64) {
@@ -136,6 +148,9 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 	// if it's >0, we'll read from the start of the chunk and we'll need to trim the offsetMod bytes from it after EOF
 	chunkStart = chunkStart - offset
 
+	// delete old chunks from RAM
+	go m.Memory().CleanChunksByNeed(chunkStart)
+
 	for {
 		// we reached the end of the file
 		if chunkStart >= m.CachedObject.Size() {
@@ -158,9 +173,6 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 				data, err = m.Storage().GetChunk(m.CachedObject, chunkStart)
 
 				if err == nil {
-					// store in RAM in case we need it again
-					//go m.Memory().ObjectDataPut(m.CachedObject, data, chunkStart)
-
 					fs.Errorf(m.FileName, "info: chunk read from storage cache %v: %v", chunkStart, fs.SizeSuffix(len(data)))
 					found = true
 					break
