@@ -1,20 +1,24 @@
 package cache
 
 import (
-	"github.com/patrickmn/go-cache"
-	"time"
 	"strconv"
-	"github.com/pkg/errors"
-	"github.com/ncw/rclone/fs"
 	"strings"
+	"time"
+
+	"github.com/ncw/rclone/fs"
+	"github.com/patrickmn/go-cache"
+	"github.com/pkg/errors"
 )
 
+// Memory is a wrapper of transient storage for a go-cache store
 type Memory struct {
 	ChunkStorage
 
-	db	*cache.Cache
+	db *cache.Cache
 }
 
+// NewMemory builds this cache storage
+// defaultExpiration will set the expiry time of chunks in this storage
 func NewMemory(defaultExpiration time.Duration) *Memory {
 	mem := &Memory{}
 	err := mem.Connect(defaultExpiration)
@@ -25,13 +29,15 @@ func NewMemory(defaultExpiration time.Duration) *Memory {
 	return mem
 }
 
+// Connect will create a connection for the storage
 func (m *Memory) Connect(defaultExpiration time.Duration) error {
 	m.db = cache.New(5*time.Minute, -1)
 
 	return nil
 }
 
-func (m *Memory) HasChunk(cachedObject *CachedObject, offset int64) bool {
+// HasChunk confirms the existence of a single chunk of an object
+func (m *Memory) HasChunk(cachedObject *Object, offset int64) bool {
 	key := cachedObject.Remote() + "-" + strconv.FormatInt(offset, 10)
 
 	_, found := m.db.Get(key)
@@ -39,7 +45,8 @@ func (m *Memory) HasChunk(cachedObject *CachedObject, offset int64) bool {
 	return found
 }
 
-func (m *Memory) GetChunk(cachedObject *CachedObject, offset int64) ([]byte, error) {
+// GetChunk will retrieve a single chunk which belongs to a cached object or an error if it doesn't find it
+func (m *Memory) GetChunk(cachedObject *Object, offset int64) ([]byte, error) {
 	key := cachedObject.Remote() + "-" + strconv.FormatInt(offset, 10)
 	var data []byte
 
@@ -52,7 +59,8 @@ func (m *Memory) GetChunk(cachedObject *CachedObject, offset int64) ([]byte, err
 	return nil, errors.Errorf("couldn't get cached object data at offset %v", offset)
 }
 
-func (m *Memory) AddChunk(cachedObject *CachedObject, data []byte, offset int64) error {
+// AddChunk adds a new chunk of a cached object
+func (m *Memory) AddChunk(cachedObject *Object, data []byte, offset int64) error {
 	key := cachedObject.Remote() + "-" + strconv.FormatInt(offset, 10)
 
 	m.db.Set(key, data, cache.DefaultExpiration)
@@ -60,15 +68,17 @@ func (m *Memory) AddChunk(cachedObject *CachedObject, data []byte, offset int64)
 	return nil
 }
 
+// CleanChunksByAge will cleanup on a cron basis
 func (m *Memory) CleanChunksByAge(chunkAge time.Duration) {
 	m.db.DeleteExpired()
 }
 
+// CleanChunksByNeed will cleanup chunks after the FS passes a specific chunk
 func (m *Memory) CleanChunksByNeed(offset int64) {
 	var items map[string]cache.Item
 
 	items = m.db.Items()
-	for key, _ := range items {
+	for key := range items {
 		sepIdx := strings.LastIndex(key, "-")
 		keyOffset, err := strconv.ParseInt(key[sepIdx+1:], 10, 64)
 		if err != nil {

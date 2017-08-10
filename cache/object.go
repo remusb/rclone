@@ -1,45 +1,46 @@
 package cache
 
 import (
-	"github.com/ncw/rclone/fs"
-	"time"
-	"io"
 	"errors"
+	"io"
 	"sync"
+	"time"
+
+	"github.com/ncw/rclone/fs"
 )
 
-// a generic file like object that stores basic information about it
-type CachedObject struct {
-	fs.Object									`json:"-"`
-	fs.ObjectUnbuffered				`json:"-"`
+// Object is a generic file like object that stores basic information about it
+type Object struct {
+	fs.Object           `json:"-"`
+	fs.ObjectUnbuffered `json:"-"`
 
-	CacheFs				*Fs					`json:"-"`				// cache fs
-	CacheString		string			`json:"string"`		// name
-	CacheRemote  	string			`json:"remote"`   // name of the directory
-	CacheModTime 	time.Time		`json:"modTime"`	// modification or creation time - IsZero for unknown
-	CacheSize    	int64				`json:"size"`     // size of directory and contents or -1 if unknown
-	CacheStorable	bool				`json:"storable"`	// says whether this object can be stored
+	CacheFs       *Fs       `json:"-"`        // cache fs
+	CacheString   string    `json:"string"`   // name
+	CacheRemote   string    `json:"remote"`   // name of the directory
+	CacheModTime  time.Time `json:"modTime"`  // modification or creation time - IsZero for unknown
+	CacheSize     int64     `json:"size"`     // size of directory and contents or -1 if unknown
+	CacheStorable bool      `json:"storable"` // says whether this object can be stored
 
-	CacheHashes	 map[fs.HashType]string	`json:"hashes"`		// all supported hashes cached
-	CacheType		 string 				`json:"cacheType"`
-	CacheTs			 time.Time			`json:"cacheTs"`	// cache timestamp
+	CacheHashes map[fs.HashType]string `json:"hashes"` // all supported hashes cached
+	CacheType   string                 `json:"cacheType"`
+	CacheTs     time.Time              `json:"cacheTs"` // cache timestamp
 
-	sourceMutex	sync.Mutex
+	sourceMutex  sync.Mutex
 	cacheManager *Manager
 }
 
-// build one from a generic fs.Object
-func NewCachedObject(f *Fs, o fs.Object) *CachedObject {
-	co := &CachedObject {
-		Object:				o,
+// NewObject builds one from a generic fs.Object
+func NewObject(f *Fs, o fs.Object) *Object {
+	co := &Object{
+		Object:        o,
 		CacheFs:       f,
 		CacheString:   o.String(),
-		CacheRemote:  o.Remote(),
-		CacheModTime: o.ModTime(),
-		CacheSize:    o.Size(),
+		CacheRemote:   o.Remote(),
+		CacheModTime:  o.ModTime(),
+		CacheSize:     o.Size(),
 		CacheStorable: o.Storable(),
-		CacheType:		"Object",
-		CacheTs:			time.Now(),
+		CacheType:     "Object",
+		CacheTs:       time.Now(),
 	}
 
 	co.cacheManager = NewManager(co)
@@ -47,36 +48,43 @@ func NewCachedObject(f *Fs, o fs.Object) *CachedObject {
 	return co
 }
 
-func (o *CachedObject) Fs() fs.Info {
+// Fs returns its FS info
+func (o *Object) Fs() fs.Info {
 	return o.CacheFs
 }
 
-func (o *CachedObject) GetCacheFs() *Fs {
+// GetCacheFs returns the CacheFS type
+func (o *Object) GetCacheFs() *Fs {
 	return o.CacheFs
 }
 
-func (o *CachedObject) String() string {
+// String returns a human friendly name for this object
+func (o *Object) String() string {
 	return o.CacheString
 }
 
-func (o *CachedObject) Remote() string {
+// Remote returns the remote path
+func (o *Object) Remote() string {
 	return o.CacheRemote
 }
 
-func (o *CachedObject) ModTime() time.Time {
+// ModTime returns the cached ModTime
+func (o *Object) ModTime() time.Time {
 	return o.CacheModTime
 }
 
-func (o *CachedObject) Size() int64 {
+// Size returns the cached Size
+func (o *Object) Size() int64 {
 	return o.CacheSize
 }
 
-func (o *CachedObject) Storable() bool {
+// Storable returns the cached Storable
+func (o *Object) Storable() bool {
 	return o.CacheStorable
 }
 
-// this requests the original FS for the object in case it comes from a cached entry
-func (o *CachedObject) RefreshObject() {
+// RefreshObject requests the original FS for the object in case it comes from a cached entry
+func (o *Object) RefreshObject() {
 	o.sourceMutex.Lock()
 	defer o.sourceMutex.Unlock()
 
@@ -92,7 +100,8 @@ func (o *CachedObject) RefreshObject() {
 	o.Object = liveObject
 }
 
-func (o *CachedObject) SetModTime(t time.Time) error {
+// SetModTime sets the ModTime of this object
+func (o *Object) SetModTime(t time.Time) error {
 	if o.Object == nil {
 		o.RefreshObject()
 	}
@@ -108,7 +117,8 @@ func (o *CachedObject) SetModTime(t time.Time) error {
 	return o.Object.SetModTime(t)
 }
 
-func (o *CachedObject) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
+// Open is used to request a specific part of the file using fs.RangeOption
+func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	//TODO: find a better way to lock this method
 	rangeFound := false
 
@@ -131,7 +141,8 @@ func (o *CachedObject) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	return o.Object.Open(options...)
 }
 
-func (o *CachedObject) Read(reqSize, reqOffset int64) (respData []byte, err error) {
+// Read is requested by fuse (most likely) for a specific chunk of the file
+func (o *Object) Read(reqSize, reqOffset int64) (respData []byte, err error) {
 	if o.Object == nil {
 		o.RefreshObject()
 	}
@@ -145,18 +156,24 @@ func (o *CachedObject) Read(reqSize, reqOffset int64) (respData []byte, err erro
 	return o.cacheManager.GetChunk(reqOffset, reqEnd)
 }
 
-func (o *CachedObject) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
-	return errors.New("can't Update")
+// Update will change the object data
+func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
+	if o.Object == nil {
+		o.RefreshObject()
+	}
+
+	return o.Object.Update(in, src, options...)
 }
 
-func (o *CachedObject) Remove() error {
+// Remove deletes the object from both the cache and the source
+func (o *Object) Remove() error {
 	if o.Object == nil {
 		o.RefreshObject()
 	}
 
 	err := o.Object.Remove()
 	// if the object was deleted from source we can clean up the cache too
-	if (err == nil) {
+	if err == nil {
 		// we delete the cache and don't care what happens with it
 		err = o.CacheFs.Cache().RemoveObject(o)
 		if err != nil {
@@ -172,7 +189,9 @@ func (o *CachedObject) Remove() error {
 	return err
 }
 
-func (o *CachedObject) Hash(ht fs.HashType) (string, error) {
+// Hash requests a hash of the object and stores in the cache
+// since it might or might not be called, this is lazy loaded
+func (o *Object) Hash(ht fs.HashType) (string, error) {
 	if o.CacheHashes == nil {
 		o.CacheHashes = make(map[fs.HashType]string)
 	}
@@ -183,7 +202,7 @@ func (o *CachedObject) Hash(ht fs.HashType) (string, error) {
 		fs.Errorf("cache", "info: object hash expired (%v)", o.Remote())
 		_ = o.CacheFs.Cache().RemoveObject(o)
 	} else if !found {
-		fs.Errorf("cache", "info: object hash not found (%v)", o.Remote())
+		// noop
 	} else {
 		fs.Errorf("cache", "info: object hash found (%v)", o.Remote())
 		return cachedHash, nil
@@ -214,6 +233,6 @@ func (o *CachedObject) Hash(ht fs.HashType) (string, error) {
 }
 
 var (
-	_ fs.Object         	= (*CachedObject)(nil)
-	_ fs.ObjectUnbuffered = (*CachedObject)(nil)
+	_ fs.Object           = (*Object)(nil)
+	_ fs.ObjectUnbuffered = (*Object)(nil)
 )

@@ -1,82 +1,90 @@
 package cache
 
 import (
-	"github.com/ncw/rclone/fs"
 	"time"
+
+	"github.com/ncw/rclone/fs"
 )
 
-// a generic dir that stores basic information about it
-type CachedDirectory struct {
-	fs.Directory						`json:"-"`
+// Directory is a generic dir that stores basic information about it
+type Directory struct {
+	fs.Directory `json:"-"`
 
-	CacheFs			*Fs					`json:"-"`				// cache fs
-	CacheString	string			`json:"string"`		// name
-	CacheRemote string			`json:"remote"`   // name of the directory
-	CacheModTime time.Time	`json:"modTime"`	// modification or creation time - IsZero for unknown
-	CacheSize    int64			`json:"size"`     // size of directory and contents or -1 if unknown
+	CacheFs      *Fs       `json:"-"`       // cache fs
+	CacheString  string    `json:"string"`  // name
+	CacheRemote  string    `json:"remote"`  // name of the directory
+	CacheModTime time.Time `json:"modTime"` // modification or creation time - IsZero for unknown
+	CacheSize    int64     `json:"size"`    // size of directory and contents or -1 if unknown
 
-	CacheItems   int64			`json:"items"`		// number of objects or -1 for unknown
-	CacheType		 string			`json:"cacheType"`// object type
-	CacheTs			 time.Time	`json:"cacheTs"`	// cache timestamp
+	CacheItems int64     `json:"items"`     // number of objects or -1 for unknown
+	CacheType  string    `json:"cacheType"` // object type
+	CacheTs    time.Time `json:"cacheTs"`   // cache timestamp
 }
 
-// build one from a generic fs.Directory
-func NewCachedDirectory(f *Fs, d fs.Directory) *CachedDirectory {
-	return &CachedDirectory{
-		Directory:		 d,
-		CacheFs:       f,
-		CacheString:   d.String(),
+// NewDirectory builds one from a generic fs.Directory
+func NewDirectory(f *Fs, d fs.Directory) *Directory {
+	return &Directory{
+		Directory:    d,
+		CacheFs:      f,
+		CacheString:  d.String(),
 		CacheRemote:  d.Remote(),
 		CacheModTime: d.ModTime(),
 		CacheSize:    d.Size(),
 		CacheItems:   d.Items(),
-		CacheType:		"Directory",
-		CacheTs:			time.Now(),
+		CacheType:    "Directory",
+		CacheTs:      time.Now(),
 	}
 }
 
-// build one from a generic fs.Directory
-func NewEmptyCachedDirectory(f *Fs, remote string) *CachedDirectory {
-	return &CachedDirectory{
-		CacheFs:       	f,
-		CacheString:  	remote,
-		CacheRemote:  	remote,
-		CacheModTime: 	time.Now(),
-		CacheSize:    	0,
-		CacheItems:   	0,
-		CacheType:			"Directory",
-		CacheTs:				time.Now(),
+// NewDirectoryEmpty builds one from a generic fs.Directory
+func NewDirectoryEmpty(f *Fs, remote string) *Directory {
+	return &Directory{
+		CacheFs:      f,
+		CacheString:  remote,
+		CacheRemote:  remote,
+		CacheModTime: time.Now(),
+		CacheSize:    0,
+		CacheItems:   0,
+		CacheType:    "Directory",
+		CacheTs:      time.Now(),
 	}
 }
 
-func (d *CachedDirectory) Fs() fs.Info {
+// Fs returns its FS info
+func (d *Directory) Fs() fs.Info {
 	return d.CacheFs
 }
 
-func (d *CachedDirectory) GetCacheFs() *Fs {
+// GetCacheFs returns the CacheFS type
+func (d *Directory) GetCacheFs() *Fs {
 	return d.CacheFs
 }
 
-func (d *CachedDirectory) String() string {
+// String returns a human friendly name for this object
+func (d *Directory) String() string {
 	return d.CacheString
 }
 
-func (d *CachedDirectory) Remote() string {
+// Remote returns the remote path
+func (d *Directory) Remote() string {
 	return d.CacheRemote
 }
 
-func (d *CachedDirectory) ModTime() time.Time {
+// ModTime returns the cached ModTime
+func (d *Directory) ModTime() time.Time {
 	return d.CacheModTime
 }
 
-func (d *CachedDirectory) Size() int64 {
+// Size returns the cached Size
+func (d *Directory) Size() int64 {
 	return d.CacheSize
 }
 
-func (d *CachedDirectory) Items() int64 {
+// Items returns the cached Items
+func (d *Directory) Items() int64 {
 	return d.CacheItems
 }
 
 var (
-	_ fs.Directory    	= (*CachedDirectory)(nil)
+	_ fs.Directory = (*Directory)(nil)
 )

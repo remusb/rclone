@@ -1,31 +1,36 @@
 package cache
 
 import (
-	"path"
-	"strings"
 	"fmt"
 	"io"
+	"path"
+	"strings"
+
+	"time"
 
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
-	"time"
 )
 
 const (
+	// DefCacheChunkSize is the default value for chunk size
 	DefCacheChunkSize = "5M"
+	// DefCacheListAge is the default value for directory listings age
 	DefCacheListAge = "5m"
+	// DefCacheFileAge is the default value for object info age
 	DefCacheFileAge = "5m"
+	// DefCacheChunkCleanAge is the default value for chunk age duration
 	DefCacheChunkCleanAge = "2m"
 )
 
 // Globals
 var (
 	// Flags
-	cacheDbPath = fs.StringP("cache-db-path", "", path.Join(path.Dir(fs.ConfigPath), "cache.db"), "Path to cache DB")
-	cacheDbPurge = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
-	cacheChunkSize = fs.SizeSuffix(-1)
-	cacheListAge = fs.StringP("cache-dir-list-age", "", "", "How much time should directory listings be stored in cache")
-	cacheFileAge = fs.StringP("cache-file-info-age", "", "", "How much time should object info be stored in cache")
+	cacheDbPath        = fs.StringP("cache-db-path", "", path.Join(path.Dir(fs.ConfigPath), "cache.db"), "Path to cache DB")
+	cacheDbPurge       = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
+	cacheChunkSize     = fs.SizeSuffix(-1)
+	cacheListAge       = fs.StringP("cache-dir-list-age", "", "", "How much time should directory listings be stored in cache")
+	cacheFileAge       = fs.StringP("cache-file-info-age", "", "", "How much time should object info be stored in cache")
 	cacheChunkCleanAge = fs.StringP("cache-chunk-clean-age", "", "", "How much time should a chunk be in cache before cleanup")
 )
 
@@ -56,7 +61,7 @@ func init() {
 					Help:  "1 Gigabyte",
 				},
 			},
-			Optional:   true,
+			Optional: true,
 		}, {
 			Name: "list_age",
 			Help: "How much time should directory listings be stored in cache.\nAccepted units are: \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".\nDefault: 1m (1 minute)",
@@ -72,7 +77,7 @@ func init() {
 					Help:  "1 hour and 30 minutes",
 				},
 			},
-			Optional:   true,
+			Optional: true,
 		}, {
 			Name: "file_age",
 			Help: "How much time should object info be stored in cache.\nAccepted units are: \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".\nDefault: 1m (1 minute)",
@@ -88,7 +93,7 @@ func init() {
 					Help:  "1 hour and 30 minutes",
 				},
 			},
-			Optional:   true,
+			Optional: true,
 		}, {
 			Name: "chunk_clean_age",
 			Help: "How old should a chunk be before cleanup.\nAccepted units are: \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".\nDefault: 2h (2 hours)",
@@ -104,23 +109,23 @@ func init() {
 					Help:  "1 hour and 30 minutes",
 				},
 			},
-			Optional:   true,
+			Optional: true,
 		}},
 	})
 
 	fs.VarP(&cacheChunkSize, "cache-chunk-size", "", "The size of a chunk. Examples: 1024 (or 1024b), 10M, 1G. Default: 10M")
 }
 
-// a storage type that supports only chunk operations (i.e in RAM)
+// ChunkStorage is a storage type that supports only chunk operations (i.e in RAM)
 type ChunkStorage interface {
 	// will check if the chunk is in storage. should be fast and not read the chunk itself if possible
-	HasChunk(cachedObject *CachedObject, offset int64) bool
+	HasChunk(cachedObject *Object, offset int64) bool
 
 	// returns the chunk in storage. return an error if it's not
-	GetChunk(cachedObject *CachedObject, offset int64) ([]byte, error)
+	GetChunk(cachedObject *Object, offset int64) ([]byte, error)
 
 	// add a new chunk
-	AddChunk(cachedObject *CachedObject, data []byte, offset int64) error
+	AddChunk(cachedObject *Object, data []byte, offset int64) error
 
 	// if the storage can cleanup on a cron basis
 	// otherwise it can do a noop operation
@@ -134,59 +139,59 @@ type ChunkStorage interface {
 	Purge()
 }
 
-// a storage type (Bolt) which needs to support both chunk and file based operations
+// Storage is a storage type (Bolt) which needs to support both chunk and file based operations
 type Storage interface {
 	ChunkStorage
 
 	// will return a directory with all the entries in it or an error if it's not found
-	GetDir(dir string) (*CachedDirectory, fs.DirEntries, error)
+	GetDir(dir string) (*Directory, fs.DirEntries, error)
 
 	// adds a new dir with the provided entries
 	// if we need an empty directory then an empty array should be provided
 	// the directory structure (all the parents of this dir) is created if its not found
-	AddDir(cachedDir *CachedDirectory, entries fs.DirEntries) (fs.DirEntries, error)
+	AddDir(cachedDir *Directory, entries fs.DirEntries) (fs.DirEntries, error)
 
 	// remove a directory and all the objects and chunks in it
-	RemoveDir(cachedDir *CachedDirectory) error
+	RemoveDir(cachedDir *Directory) error
 
 	// will return an object (file) or error if it doesn't find it
-	GetObject(p string) (cachedObject *CachedObject, err error)
+	GetObject(p string) (cachedObject *Object, err error)
 
 	// add a new object to its parent directory
 	// the directory structure (all the parents of this object) is created if its not found
-	AddObject(cachedObject *CachedObject) error
+	AddObject(cachedObject *Object) error
 
 	// remove an object and all its chunks
-	RemoveObject(cachedObject *CachedObject) error
+	RemoveObject(cachedObject *Object) error
 
 	// if the storage supports statistics, generate and do something with them
 	Stats()
 }
 
-// stats to generate for storage usage
-type CacheStats struct {
-	TotalDirLists		int
-	TotalBytes			string
-	TotalChunks			int
-	TotalFiles			int
+// Stats are stats to generate for storage usage
+type Stats struct {
+	TotalDirLists int
+	TotalBytes    string
+	TotalChunks   int
+	TotalFiles    int
 }
 
 // Fs represents a wrapped fs.Fs
 type Fs struct {
 	fs.Fs
 
-	name     	string
-	root     	string
-	features	*fs.Features // optional features
-	cache   	Storage
-	memory		ChunkStorage
+	name     string
+	root     string
+	features *fs.Features // optional features
+	cache    Storage
+	memory   ChunkStorage
 
-	listAge		time.Duration
-	fileAge		time.Duration
-	chunkSize int64
-	chunkCleanAge	time.Duration
+	listAge       time.Duration
+	fileAge       time.Duration
+	chunkSize     int64
+	chunkCleanAge time.Duration
 
-	lastCleanup	time.Time
+	lastCleanup time.Time
 }
 
 // NewFs contstructs an Fs from the path, container:path
@@ -263,15 +268,15 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	m := NewMemory(chunkCleanDuration)
 
 	f := &Fs{
-		Fs:     wrappedFs,
-		name:   name,
-		root:   rpath,
-		memory: m,
-		listAge: listDuration,
-		fileAge: fileDuration,
-		chunkSize: int64(chunkSize),
+		Fs:            wrappedFs,
+		name:          name,
+		root:          rpath,
+		memory:        m,
+		listAge:       listDuration,
+		fileAge:       fileDuration,
+		chunkSize:     int64(chunkSize),
 		chunkCleanAge: chunkCleanDuration,
-		lastCleanup: time.Now(),
+		lastCleanup:   time.Now(),
 	}
 
 	f.cache = NewBolt(*cacheDbPath, *cacheDbPurge, f)
@@ -282,15 +287,15 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	f.features = (&fs.Features{
 		ReadMimeType:    false, // MimeTypes not supported with crypt
 		WriteMimeType:   false,
-		Purge:					 f.Purge,
-		Copy:						 f.Copy,
-		Move:						 f.Move,
-		DirMove:				 f.DirMove,
+		Purge:           f.Purge,
+		Copy:            f.Copy,
+		Move:            f.Move,
+		DirMove:         f.DirMove,
 		DirChangeNotify: nil, // TODO: Add this
-		DirCacheFlush:	 nil,
-		PutUnchecked:		 f.PutUnchecked,
-		CleanUp:				 f.CleanUp,
-		FileReadRaw:		 true,
+		DirCacheFlush:   nil,
+		PutUnchecked:    f.PutUnchecked,
+		CleanUp:         f.CleanUp,
+		FileReadRaw:     true,
 	}).Fill(f)
 
 	return f, wrapErr
@@ -316,10 +321,12 @@ func (f *Fs) String() string {
 	return fmt.Sprintf("Cached drive '%s:%s'", f.name, f.root)
 }
 
+// Cache is the persistent type cache
 func (f *Fs) Cache() Storage {
 	return f.cache
 }
 
+// Memory is the transient type cache
 func (f *Fs) Memory() ChunkStorage {
 	return f.memory
 }
@@ -350,7 +357,7 @@ func (f *Fs) NewObject(remote string) (fs.Object, error) {
 	fs.Errorf(liveObject, "info: object (%v) from source fs (%v)", remote, f.Fs.Name())
 
 	// We used the source so let's cache the result for later usage
-	cachedObject = NewCachedObject(f, liveObject)
+	cachedObject = NewObject(f, liveObject)
 	err = f.cache.AddObject(cachedObject)
 	if err != nil {
 		fs.Infof(remote, "could not be cached: %v", err)
@@ -361,16 +368,16 @@ func (f *Fs) NewObject(remote string) (fs.Object, error) {
 
 // List the objects and directories in dir into entries
 func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
-	var cachedDir *CachedDirectory
+	var cachedDir *Directory
 
 	// Get raw cached entries from cache
 	cachedDir, entries, err = f.cache.GetDir(dir)
 
 	if err != nil {
-		cachedDir = NewEmptyCachedDirectory(f, dir)
+		cachedDir = NewDirectoryEmpty(f, dir)
 		fs.Errorf(dir, "info: couldn't get dir entries from cache [%v]: %v", dir, err)
 	} else if len(entries) == 0 {
-		cachedDir = NewEmptyCachedDirectory(f, dir)
+		cachedDir = NewDirectoryEmpty(f, dir)
 		// TODO: read empty dirs from source?
 	} else {
 		//fs.Errorf(dir, "info: found dir entries [%v] %v", dir, len(entries))
@@ -401,13 +408,9 @@ func (f *Fs) recurse(dir string, list *fs.ListRHelper) error {
 		return err
 	}
 
-	fs.Errorf(f, "traversing %v", dir)
-
 	for i := 0; i < len(entries); i++ {
-		fs.Errorf(f, "recursed over %+v", entries[i].Remote())
-
 		innerDir, ok := entries[i].(fs.Directory)
-		if ok && innerDir.Remote() != "" {
+		if ok {
 			err := f.recurse(innerDir.Remote(), list)
 			if err != nil {
 				return err
@@ -438,9 +441,9 @@ func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
 			for _, entry := range entries {
 				switch o := entry.(type) {
 				case fs.Object:
-					err = f.cache.AddObject(NewCachedObject(f, o))
+					err = f.cache.AddObject(NewObject(f, o))
 				case fs.Directory:
-					_, err = f.cache.AddDir(NewCachedDirectory(f, o), emptyDirEntries)
+					_, err = f.cache.AddDir(NewDirectory(f, o), emptyDirEntries)
 				default:
 					return errors.Errorf("Unknown object type %T", entry)
 				}
@@ -474,7 +477,7 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.
 	}
 
 	// build a cached object and inject it in the cached listing of its parent
-	cachedObj := NewCachedObject(f, liveObj)
+	cachedObj := NewObject(f, liveObj)
 	err = f.cache.AddObject(cachedObj)
 	if err != nil {
 		fs.Errorf(cachedObj, "info: couldn't store in cache: %v", err)
@@ -492,14 +495,17 @@ func (f *Fs) Hashes() fs.HashSet {
 // Mkdir makes the directory (container, bucket)
 func (f *Fs) Mkdir(dir string) error {
 	err := f.Fs.Mkdir(dir)
-
 	if err != nil {
 		return err
 	}
 
+	if dir == "" { // creating the root is possible but we don't need that cached as we have it already
+		return nil
+	}
+
 	// make an empty dir
 	var emptyDirEntries fs.DirEntries
-	_, err = f.cache.AddDir(NewEmptyCachedDirectory(f, dir), emptyDirEntries)
+	_, err = f.cache.AddDir(NewDirectoryEmpty(f, dir), emptyDirEntries)
 	if err != nil {
 		fs.Errorf(dir, "couldn't cache empty directory: %v", err)
 	}
@@ -514,7 +520,7 @@ func (f *Fs) Rmdir(dir string) error {
 		return err
 	}
 
-	err = f.cache.RemoveDir(NewEmptyCachedDirectory(f, dir))
+	err = f.cache.RemoveDir(NewDirectoryEmpty(f, dir))
 	if err != nil {
 		fs.Errorf("cache", "failed to remove cached dir (%v): %v", dir, err)
 	}
@@ -536,7 +542,7 @@ func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 	}
 
 	// clear any likely dir cached at dst
-	dstCachedDir := NewEmptyCachedDirectory(f, dstRemote)
+	dstCachedDir := NewDirectoryEmpty(f, dstRemote)
 	err = f.cache.RemoveDir(dstCachedDir)
 	if err != nil {
 		fs.Infof(dstRemote, "failed to remove cached dir: %v", err)
@@ -584,7 +590,7 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 	}
 
 	// store in cache
-	cachedObj := NewCachedObject(f, liveObj)
+	cachedObj := NewObject(f, liveObj)
 	err = f.cache.AddObject(cachedObj)
 	if err != nil {
 		fs.Errorf(cachedObj, "info: couldn't store in cache: %v", err)
@@ -607,14 +613,14 @@ func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 	}
 
 	// remove data from src
-	srcCachedObj := NewCachedObject(f, src)
+	srcCachedObj := NewObject(f, src)
 	err = f.cache.RemoveObject(srcCachedObj)
 	if err != nil {
 		fs.Infof(srcCachedObj, "couldn't remove from cache: %v", err)
 	}
 
 	// add new one in cache
-	cachedObj := NewCachedObject(f, liveObj)
+	cachedObj := NewObject(f, liveObj)
 	err = f.cache.AddObject(cachedObj)
 	if err != nil {
 		fs.Errorf(cachedObj, "info: couldn't store in cache: %v", err)
@@ -637,7 +643,7 @@ func (f *Fs) PutUnchecked(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOpt
 	}
 
 	// store in cache
-	cachedObj := NewCachedObject(f, liveObj)
+	cachedObj := NewObject(f, liveObj)
 	err = f.cache.AddObject(cachedObj)
 	if err != nil {
 		fs.Errorf(cachedObj, "info: couldn't store in cache: %v", err)
@@ -649,7 +655,7 @@ func (f *Fs) PutUnchecked(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOpt
 
 // CleanUp the trash in the Fs
 func (f *Fs) CleanUp() error {
-	f.CleanUpCache()
+	f.cleanUpCache()
 
 	do := f.Fs.Features().CleanUp
 	if do == nil {
@@ -660,7 +666,7 @@ func (f *Fs) CleanUp() error {
 	return do()
 }
 
-func (f *Fs) CleanUpCache() {
+func (f *Fs) cleanUpCache() {
 	if time.Now().Before(f.lastCleanup.Add(f.chunkCleanAge)) {
 		return
 	}

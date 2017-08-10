@@ -4,53 +4,50 @@ import (
 	"io"
 	"path"
 
-	"github.com/ncw/rclone/fs"
-	"time"
 	"sync"
+	"time"
+
+	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
 )
 
+// Manager is managing the chunk retrieval from both source and cache for a single object
 type Manager struct {
-	CachedObject		*CachedObject
-	FileName				string
-	ReadRetries			int
-	DownloadRetries	int
-	TotalWorkers 		int
-	workerGroup			sync.WaitGroup
+	CachedObject    *Object
+	FileName        string
+	ReadRetries     int
+	DownloadRetries int
+	TotalWorkers    int
+	workerGroup     sync.WaitGroup
 }
 
-func NewManager(o *CachedObject) *Manager {
+// NewManager returns a simple manager
+func NewManager(o *Object) *Manager {
 	return &Manager{
-		CachedObject: o,
-		FileName: path.Base(o.Remote()),
-		ReadRetries: 5,
+		CachedObject:    o,
+		FileName:        path.Base(o.Remote()),
+		ReadRetries:     5,
 		DownloadRetries: 3,
-		TotalWorkers: 4,
+		TotalWorkers:    4,
 	}
 }
 
-func NewBufferedManager(o *CachedObject, offset int64, end int64) *Manager {
-	return &Manager{
-		CachedObject: o,
-		FileName: path.Base(o.Remote()),
-		ReadRetries: 5,
-		DownloadRetries: 3,
-		TotalWorkers: 4,
-	}
-}
-
+// CacheFs is a convenience method to get the parent cache FS of the object's manager
 func (m *Manager) CacheFs() *Fs {
 	return m.CachedObject.CacheFs
 }
 
+// Storage is a convenience method to get the persistent storage of the object's manager
 func (m *Manager) Storage() Storage {
 	return m.CacheFs().Cache()
 }
 
+// Memory is a convenience method to get the transient storage of the object's manager
 func (m *Manager) Memory() ChunkStorage {
 	return m.CacheFs().Memory()
 }
 
+// DownloadWorker is a single routine that downloads a single chunk and stores in both transient and persistent storage
 func (m *Manager) DownloadWorker(chunkStart int64) {
 	var err error
 	var reader io.ReadCloser
@@ -59,7 +56,7 @@ func (m *Manager) DownloadWorker(chunkStart int64) {
 	defer m.workerGroup.Done()
 
 	// align the EOF
-	if (chunkEnd > m.CachedObject.Size()) {
+	if chunkEnd > m.CachedObject.Size() {
 		chunkEnd = m.CachedObject.Size()
 	}
 
@@ -100,6 +97,7 @@ func (m *Manager) DownloadWorker(chunkStart int64) {
 	}
 }
 
+// StartWorkers will start TotalWorkers which will download chunks and store them in cache
 func (m *Manager) StartWorkers(chunkStart int64) {
 	m.workerGroup.Wait()
 
@@ -132,6 +130,9 @@ func (m *Manager) StartWorkers(chunkStart int64) {
 	}
 }
 
+// GetChunk is called by the FS to retrieve a specific chunk of known start and size from where it can find it
+// it can be from transient or persistent cache
+// it will also build the chunk from the cache's specific chunk boundaries and build the final desired chunk in a buffer
 func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 	fs.Errorf(m.FileName, "info: reading chunk %v-%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(chunkEnd))
 
@@ -204,7 +205,7 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 		// every chunk will be checked for the end
 		dataSize := int64(len(data))
 		totalBufferSize := int64(len(buffer))
-		if totalBufferSize + dataSize > reqSize {
+		if totalBufferSize+dataSize > reqSize {
 			dataSize = reqSize - totalBufferSize
 			//fs.Errorf(m.FileName, "info: chunk end align %v->%v", fs.SizeSuffix(chunkStart+offset+int64(len(data))), fs.SizeSuffix(chunkStart+offset+dataSize))
 			data = data[0:dataSize]

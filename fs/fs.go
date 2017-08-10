@@ -162,7 +162,7 @@ type Info interface {
 	Features() *Features
 }
 
-// Object is a filesystem like object provided by an Fs
+// ObjectUnbuffered provides direct read/write capabilities from fuse
 type ObjectUnbuffered interface {
 	Object
 
@@ -255,7 +255,7 @@ type Features struct {
 	DuplicateFiles  bool
 	ReadMimeType    bool
 	WriteMimeType   bool
-	FileReadRaw 		bool
+	FileReadRaw     bool
 
 	// Purge all files in the root and the root directory
 	//
