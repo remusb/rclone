@@ -73,7 +73,7 @@ func (m *Manager) DownloadWorker(chunkStart int64) {
 
 	// we seem to be getting only errors so we abort
 	if err != nil {
-		fs.Errorf(m.FileName, "info: object open failed %v: %v", chunkStart, err)
+		fs.Errorf(m.FileName, "object open failed %v: %v", chunkStart, err)
 		return
 	}
 
@@ -84,16 +84,16 @@ func (m *Manager) DownloadWorker(chunkStart int64) {
 	}
 	err = reader.Close()
 	if err != nil {
-		fs.Debugf(m.FileName, "failed to close reader for %v: %v", chunkStart, err)
+		fs.Errorf(m.FileName, "failed to close reader for %v: %v", chunkStart, err)
 	}
 
 	err = m.Memory().AddChunk(m.CachedObject, data, chunkStart)
 	if err != nil {
-		fs.Debugf(m.FileName, "failed cache chunk in ram %v: %v", chunkStart, err)
+		fs.Errorf(m.FileName, "failed caching chunk in ram %v: %v", chunkStart, err)
 	}
 	err = m.Storage().AddChunk(m.CachedObject, data, chunkStart)
 	if err != nil {
-		fs.Debugf(m.FileName, "failed cache chunk in storage %v: %v", chunkStart, err)
+		fs.Errorf(m.FileName, "failed caching chunk in storage %v: %v", chunkStart, err)
 	}
 }
 
@@ -134,7 +134,7 @@ func (m *Manager) StartWorkers(chunkStart int64) {
 // it can be from transient or persistent cache
 // it will also build the chunk from the cache's specific chunk boundaries and build the final desired chunk in a buffer
 func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
-	fs.Errorf(m.FileName, "info: reading chunk %v-%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(chunkEnd))
+	fs.Infof(m.FileName, "reading chunk %v-%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(chunkEnd))
 
 	reqSize := chunkEnd - chunkStart
 	buffer := make([]byte, 0, reqSize)
@@ -155,7 +155,7 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 	for {
 		// we reached the end of the file
 		if chunkStart >= m.CachedObject.Size() {
-			fs.Errorf(m.FileName, "info: reached EOF %v", chunkStart)
+			fs.Debugf(m.FileName, "reached EOF %v", chunkStart)
 			break
 		}
 
@@ -163,7 +163,7 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 		data, err = m.Memory().GetChunk(m.CachedObject, chunkStart)
 		if err == nil {
 			found = true
-			fs.Errorf(m.FileName, "info: chunk read from ram cache %v-%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(len(data)))
+			fs.Infof(m.FileName, "chunk read from ram cache %v-%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(len(data)))
 		}
 
 		start := time.Now()
@@ -174,31 +174,31 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 				data, err = m.Storage().GetChunk(m.CachedObject, chunkStart)
 
 				if err == nil {
-					fs.Errorf(m.FileName, "info: chunk read from storage cache %v: %v", chunkStart, fs.SizeSuffix(len(data)))
+					fs.Infof(m.FileName, "%v: chunk read from storage cache: %v", chunkStart, fs.SizeSuffix(len(data)))
 					found = true
 					break
 				}
 
-				fs.Errorf(m.FileName, "info: chunk retry storage %v: %v", chunkStart, i)
+				fs.Debugf(m.FileName, "%v: chunk retry storage: %v", chunkStart, i)
 				time.Sleep(time.Second)
 			}
 		}
 
 		elapsed := time.Since(start)
 		if elapsed > time.Second {
-			fs.Errorf(m.FileName, "%v: chunk search storage: %s", chunkStart, elapsed)
+			fs.Debugf(m.FileName, "%v: chunk search storage: %s", chunkStart, elapsed)
 		}
 
 		// not found in ram or
 		// the worker didn't managed to download the chunk in time so we abort and close the stream
 		if err != nil || len(data) == 0 || !found {
-			return nil, errors.Errorf("info: chunk not found %v", chunkStart)
+			return nil, errors.Errorf("chunk not found %v", chunkStart)
 		}
 
 		// TODO: maybe a more efficient way to do this?
 		// first chunk will be aligned with the start
 		if offset > 0 {
-			//fs.Errorf(m.FileName, "info: chunk start align %v->%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(chunkStart+offset))
+			fs.Debugf(m.FileName, "chunk start align %v->%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(chunkStart+offset))
 			data = data[int(offset):]
 		}
 
@@ -207,7 +207,7 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 		totalBufferSize := int64(len(buffer))
 		if totalBufferSize+dataSize > reqSize {
 			dataSize = reqSize - totalBufferSize
-			//fs.Errorf(m.FileName, "info: chunk end align %v->%v", fs.SizeSuffix(chunkStart+offset+int64(len(data))), fs.SizeSuffix(chunkStart+offset+dataSize))
+			fs.Debugf(m.FileName, "chunk end align %v->%v", fs.SizeSuffix(chunkStart+offset+int64(len(data))), fs.SizeSuffix(chunkStart+offset+dataSize))
 			data = data[0:dataSize]
 		}
 
@@ -215,7 +215,7 @@ func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
 		totalBufferSize = int64(len(buffer))
 
 		if totalBufferSize >= reqSize {
-			fs.Errorf(m.FileName, "info: chunk wrote to stream %v: %v", chunkStart, fs.SizeSuffix(totalBufferSize).String())
+			fs.Infof(m.FileName, "chunk wrote to stream %v: %v", chunkStart, fs.SizeSuffix(totalBufferSize).String())
 			break
 		}
 
