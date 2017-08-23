@@ -135,9 +135,6 @@ type ChunkStorage interface {
 	// if the storage can cleanup chunks after we no longer need them
 	// otherwise it can do a noop operation
 	CleanChunksByNeed(offset int64)
-
-	// this will clear all the data in the storage
-	//Purge()
 }
 
 // Storage is a storage type (Bolt) which needs to support both chunk and file based operations
@@ -190,19 +187,19 @@ type Stats struct {
 type Fs struct {
 	fs.Fs
 
-	name     string
-	root     string
-	features *fs.Features // optional features
-	cache    Storage
-	store    *cache.Cache
-	memory   ChunkStorage
+	name          string
+	root          string
+	features      *fs.Features // optional features
+	cache         Storage
+	cacheInfo     *cache.Cache
+	memory        ChunkStorage
 
 	listAge       time.Duration
 	fileAge       time.Duration
 	chunkSize     int64
 	chunkCleanAge time.Duration
 
-	lastCleanup time.Time
+	lastCleanup   time.Time
 }
 
 // NewFs contstructs an Fs from the path, container:path
@@ -272,11 +269,6 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		fs.Debugf(name, "Purging the DB")
 	}
 
-	//fs.Infof(name, "listAge: %v", listDuration.String())
-	//fs.Infof(name, "fileAge: %v", fileDuration.String())
-	//fs.Infof(name, "chunkSize: %v", chunkSize.String())
-	//fs.Infof(name, "chunkCleanMinAge: %v", chunkCleanDuration.String())
-
 	m := NewMemory(chunkCleanDuration)
 
 	f := &Fs{
@@ -291,7 +283,16 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		lastCleanup:   time.Now(),
 	}
 
-	f.store = cache.New(fileDuration, time.Minute)
+	f.cacheInfo = cache.New(fileDuration, time.Minute)
+	// callback on transient expiration to persist in storage
+	f.cacheInfo.OnEvicted(func(k string, v interface{}) {
+		if d, ok := v.(*Directory); ok && d != nil {
+			d.Persist()
+		}
+		if o, ok := v.(*Object); ok && o != nil {
+			o.Persist()
+		}
+	})
 
 	dbPath := *cacheDbPath
 	if path.Ext(dbPath) != "" {
@@ -317,7 +318,6 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		PutUnchecked:    f.PutUnchecked,
 		CleanUp:         f.CleanUp,
 		UnWrap:          f.UnWrap,
-		FileReadRaw:     true,
 	}).Fill(f)
 
 	return f, wrapErr
@@ -348,6 +348,11 @@ func (f *Fs) Cache() Storage {
 	return f.cache
 }
 
+// Cache is the persistent type cache
+func (f *Fs) CacheInfo() *cache.Cache {
+	return f.cacheInfo
+}
+
 // Memory is the transient type cache
 func (f *Fs) Memory() ChunkStorage {
 	return f.memory
@@ -357,65 +362,24 @@ func (f *Fs) Memory() ChunkStorage {
 func (f *Fs) NewObject(remote string) (fs.Object, error) {
 	fs.Debugf(f, "find object at '%s'", f.cleanPath(remote))
 
-	cachedObject := NewObjectEmpty(f, f.cleanPath(remote))
-	err := f.cache.GetObject(cachedObject)
-
-	if err == nil {
-		return cachedObject, nil
-	}
-
-	// Get live object from source or fail
-	liveObject, err := f.Fs.NewObject(remote)
-	if err != nil || liveObject == nil {
+	cachedObject, err := ObjectFromCacheOrSource(f, f.cleanPath(remote), func() (fs.Object, error) {
+		return f.Fs.NewObject(remote)
+	})
+	if err != nil {
 		return nil, err
 	}
-
-	// We used the source so let's cache the result for later usage
-	cachedObject = NewObject(f, liveObject)
-	err = f.cache.AddObject(cachedObject)
-	if err != nil {
-		fs.Errorf(remote, "could not be cached: %v", err)
-	}
-
-	return cachedObject, err
+	return cachedObject, nil
 }
 
 // List the objects and directories in dir into entries
 func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	fs.Debugf(f, "list dir at '%s'", f.cleanPath(dir))
 
-	var cachedDir *Directory
-
 	// Get raw cached entries from cache
-	cachedDir = NewDirectoryEmpty(f, f.cleanPath(dir))
-	entries, err = f.cache.GetDirEntries(cachedDir)
-
-	if err != nil {
-		fs.Debugf(dir, "no dir entries in cache: %v", err)
-	} else if len(entries) == 0 {
-		// TODO: read empty dirs from source?
-	} else {
-		fs.Debugf(f, "found dir entries at '%v': %v", dir, len(entries))
-		return entries, nil
-	}
-
-	// Get live entries from source or fail
-	entries, err = f.Fs.List(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	fs.Debugf(f, "source dir entries at '%v': %+v", dir, entries)
-
-	// We used the source so let's cache the result for later usage
-	cachedEntries, err := f.cache.AddDirEntries(cachedDir, entries)
-	if err != nil {
-		// TODO return original list when fails?
-		fs.Errorf(dir, "error caching dir entries: %v", err)
-		return entries, nil
-	}
-
-	return cachedEntries, nil
+	cachedDir := DirectoryFromCacheOrNew(f, f.cleanPath(dir))
+	return cachedDir.GetEntries(func() (fs.DirEntries, error) {
+		return f.Fs.List(dir)
+	})
 }
 
 func (f *Fs) recurse(dir string, list *fs.ListRHelper) error {
@@ -453,20 +417,14 @@ func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
 	if do != nil {
 		return f.Fs.Features().ListR(dir, func(entries fs.DirEntries) error {
 			// we got called back with a set of entries so let's cache them and call the original callback
-			var err error
-
 			for _, entry := range entries {
 				switch o := entry.(type) {
 				case fs.Object:
-					err = f.cache.AddObject(NewObject(f, o))
+					ObjectFromOriginal(f, o).Persist().Cache()
 				case fs.Directory:
-					err = f.cache.AddDir(NewDirectory(f, o))
+					DirectoryFromOriginal(f, o).Persist().Cache()
 				default:
 					return errors.Errorf("Unknown object type %T", entry)
-				}
-
-				if err != nil {
-					fs.Debugf(entry, "could not be cached: %v", err)
 				}
 			}
 
@@ -485,52 +443,6 @@ func (f *Fs) ListR(dir string, callback fs.ListRCallback) (err error) {
 	return list.Flush()
 }
 
-// Put in to the remote path with  the modTime given of the given size
-func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	fs.Debugf(f, "put data at '%s'", src.Remote())
-
-	// upload original object
-	liveObj, err := f.Fs.Put(in, src, options...)
-	if err != nil {
-		return nil, err
-	}
-
-	// build a cached object and inject it in the cached listing of its parent
-	cachedObj := NewObject(f, liveObj)
-	err = f.cache.AddObject(cachedObj)
-	if err != nil {
-		fs.Errorf(liveObj, "error saving in cache: %v", err)
-		return cachedObj, err
-	}
-
-	return cachedObj, nil
-}
-
-// PutUnchecked uploads the object
-func (f *Fs) PutUnchecked(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	fs.Debugf(f, "put data unchecked in '%s'", src.Remote())
-
-	do := f.Fs.Features().PutUnchecked
-	if do == nil {
-		return nil, errors.New("can't PutUnchecked")
-	}
-
-	liveObj, err := do(in, src, options...)
-	if err != nil {
-		return nil, err
-	}
-
-	// store in cache
-	cachedObj := NewObject(f, liveObj)
-	err = f.cache.AddObject(cachedObj)
-	if err != nil {
-		fs.Errorf(cachedObj, "error saving in cache: %v", err)
-		return cachedObj, err
-	}
-
-	return cachedObj, nil
-}
-
 // Mkdir makes the directory (container, bucket)
 func (f *Fs) Mkdir(dir string) error {
 	fs.Debugf(f, "make dir '%s'", dir)
@@ -546,11 +458,7 @@ func (f *Fs) Mkdir(dir string) error {
 	}
 
 	// make an empty dir
-	err = f.cache.AddDir(NewDirectoryEmpty(f, dir))
-	if err != nil {
-		fs.Errorf(dir, "error caching dir: %v", err)
-		return nil
-	}
+	DirectoryFromCacheOrNew(f, dir).Persist()
 
 	return nil
 }
@@ -564,11 +472,7 @@ func (f *Fs) Rmdir(dir string) error {
 		return err
 	}
 
-	err = f.cache.RemoveDir(NewDirectoryEmpty(f, dir))
-	if err != nil {
-		fs.Errorf(dir, "error removing cached dir: %v", err)
-		return nil
-	}
+	DirectoryFromCacheOrNew(f, dir).Flush()
 
 	return nil
 }
@@ -600,21 +504,47 @@ func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 	}
 
 	// clear any likely dir cached at dst
-	srcCachedDir := NewDirectoryEmpty(srcFs, srcRemote)
-	err = f.cache.RemoveDir(srcCachedDir)
-	if err != nil {
-		fs.Errorf(srcCachedDir, "error removing cached dir: %v", err)
-		return nil
-	}
+	DirectoryFromCacheOrNew(srcFs, srcRemote).Flush()
 
 	// get a list of entries of the new dir to cache
-	dstCachedDir := NewDirectoryEmpty(f, dstRemote)
-	err = f.cache.AddDir(dstCachedDir)
-	if err != nil {
-		fs.Errorf(dstRemote, "failed to cache new dir: %v", err)
-	}
+	DirectoryFromCacheOrNew(f, dstRemote).Persist()
 
 	return nil
+}
+
+// Put in to the remote path with the modTime given of the given size
+func (f *Fs) Put(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	fs.Debugf(f, "put data at '%s'", src.Remote())
+
+	cachedObj, err := ObjectFromSource(f, f.cleanPath(src.Remote()), func() (fs.Object, error) {
+		return f.Fs.Put(in, src, options...)
+	})
+	if err != nil {
+		fs.Errorf(cachedObj, "error saving in cache: %v", err)
+		return cachedObj, err
+	}
+
+	return cachedObj, nil
+}
+
+// PutUnchecked uploads the object
+func (f *Fs) PutUnchecked(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	fs.Debugf(f, "put data unchecked in '%s'", src.Remote())
+
+	do := f.Fs.Features().PutUnchecked
+	if do == nil {
+		return nil, errors.New("can't PutUnchecked")
+	}
+
+	cachedObj, err := ObjectFromSource(f, f.cleanPath(src.Remote()), func() (fs.Object, error) {
+		return do(in, src, options...)
+	})
+	if err != nil {
+		fs.Errorf(cachedObj, "error saving in cache: %v", err)
+		return cachedObj, err
+	}
+
+	return cachedObj, nil
 }
 
 // Copy src to this remote using server side copy operations.
@@ -637,22 +567,18 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 
 	fs.Debugf(f, "copy obj '%s' -> '%s'", srcObj.Abs(), remote)
 
-	if err := srcObj.RefreshFromSource(); err != nil {
-		fs.Errorf(f, "can't move %v - %v", src, err)
-		return nil, fs.ErrorCantCopy
-	}
-
-	liveObj, err := do(srcObj.Object, remote)
-	if err != nil {
-		return liveObj, err
-	}
-
 	// store in cache
-	cachedObj := NewObject(f, liveObj)
-	err = f.cache.AddObject(cachedObj)
+	cachedObj, err := ObjectFromSource(f, f.cleanPath(remote), func() (fs.Object, error) {
+		if err := srcObj.RefreshFromSource(); err != nil {
+			fs.Errorf(f, "can't move %v - %v", src, err)
+			return nil, fs.ErrorCantCopy
+		}
+
+		return do(srcObj.Object, remote)
+	})
 	if err != nil {
 		fs.Errorf(cachedObj, "error saving in cache: %v", err)
-		return cachedObj, err
+		return nil, err
 	}
 
 	return cachedObj, nil
@@ -678,30 +604,20 @@ func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 
 	fs.Debugf(f, "move obj '%s' -> %s", srcObj.Abs(), remote)
 
-	if err := srcObj.RefreshFromSource(); err != nil {
-		fs.Errorf(f, "can't move %v - %v", src, err)
-		return nil, fs.ErrorCantMove
-	}
+	cachedObj, err := ObjectFromSource(f, f.cleanPath(remote), func() (fs.Object, error) {
+		if err := srcObj.RefreshFromSource(); err != nil {
+			fs.Errorf(f, "can't move %v - %v", src, err)
+			return nil, fs.ErrorCantMove
+		}
 
-	liveObj, err := do(srcObj.Object, remote)
-	if err != nil {
-		return liveObj, err
-	}
-
-	// add new one in cache
-	cachedObj := NewObject(f, liveObj)
-	err = f.cache.AddObject(cachedObj)
+		return do(srcObj.Object, remote)
+	})
 	if err != nil {
 		fs.Errorf(cachedObj, "error saving in cache: %v", err)
-		return cachedObj, err
+		return nil, err
 	}
 
-	// remove data from src
-	err = f.cache.RemoveObject(srcObj)
-	if err != nil {
-		fs.Errorf(srcObj, "error removing from cache: %v", err)
-	}
-
+	srcObj.Flush()
 	return cachedObj, nil
 }
 
@@ -725,13 +641,8 @@ func (f *Fs) Purge() error {
 		return err
 	}
 
-	d := NewDirectoryEmpty(f, "")
-	err = f.Cache().RemoveDir(d)
-	if err != nil {
-		fs.Errorf(f, "cache purge failed: %v", err)
-	}
-
-	f.cacheState.Flush()
+	DirectoryFromCacheOrNew(f, "").Flush()
+	f.cacheInfo.Flush()
 
 	return nil
 }
@@ -759,8 +670,8 @@ func (f *Fs) cleanUpCache() {
 	fs.Debugf("cache", "starting cache cleanup")
 	f.cache.CleanChunksByAge(f.chunkCleanAge)
 
-	fs.Debugf("cache", "starting stats")
-	f.cache.Stats()
+	//fs.Debugf("cache", "starting stats")
+	//f.cache.Stats()
 
 	fs.Debugf("cache", "starting memory cleanup")
 	f.memory.CleanChunksByAge(f.chunkCleanAge)
@@ -776,7 +687,7 @@ func (f *Fs) UnWrap() fs.Fs {
 
 // DirCacheFlush flushes the dir cache
 func (f *Fs) DirCacheFlush() {
-	f.cacheState.Flush()
+	f.cacheInfo.Flush()
 }
 
 func (f *Fs) cleanPath(p string) string {
@@ -786,6 +697,17 @@ func (f *Fs) cleanPath(p string) string {
 	}
 
 	return p
+}
+
+func (f *Fs) addOrUpdateCacheInfo(p string) error {
+	var err error
+
+	err = f.cacheInfo.Add(p, true, cache.DefaultExpiration)
+	if err != nil {
+		err = f.cacheInfo.Replace(p, true, cache.DefaultExpiration)
+	}
+
+	return err
 }
 
 // Check the interfaces are satisfied

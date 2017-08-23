@@ -10,12 +10,15 @@ import (
 	"strings"
 
 	"github.com/ncw/rclone/fs"
+	"github.com/patrickmn/go-cache"
 )
+
+type GetObjectFromSource func() (fs.Object, error)
 
 // Object is a generic file like object that stores basic information about it
 type Object struct {
 	fs.Object           `json:"-"`
-	fs.ObjectUnbuffered `json:"-"`
+	fs.BlockReader 			`json:"-"`
 
 	CacheFs       *Fs    `json:"-"`        // cache fs
 	Name          string `json:"name"`     // name of the directory
@@ -26,51 +29,112 @@ type Object struct {
 
 	CacheHashes map[fs.HashType]string `json:"hashes"` // all supported hashes cached
 	CacheType   string                 `json:"cacheType"`
-	CacheTs     time.Time              `json:"cacheTs"` // cache timestamp
 
 	refreshMutex sync.Mutex
 	cacheManager *Manager
 }
 
 // NewObject builds one from a generic fs.Object
-func NewObject(f *Fs, o fs.Object) *Object {
-	dir, name := path.Split(path.Join(f.Root(), o.Remote()))
-	//fs.Debugf(f, "building '%v'/'%v' from '%v'", dir, name, o.Remote())
-
-	co := &Object{
-		CacheFs: f,
-		Name:    name,
-		Dir:     dir,
-	}
-	co.updateData(o)
-	co.cacheManager = NewManager(co)
-
-	//fs.Debugf(f, "remote for '%v' is '%v'", o.Remote(), co.Remote())
-
-	return co
-}
-
-// NewObjectEmpty builds one from a generic fs.Object
-func NewObjectEmpty(f *Fs, remote string) *Object {
-	dir, name := path.Split(path.Join(f.Root(), remote))
-
-	//fs.Debugf(f, "building '%v'/'%v' from '%v'", dir, name, remote)
+func NewObject(f *Fs, remote string) *Object {
+	fullRemote := path.Join(f.Root(), remote)
+	dir, name := path.Split(fullRemote)
 
 	co := &Object{
 		CacheFs:       f,
-		Name:          name,
-		Dir:           dir,
+		Name:          f.cleanPath(name),
+		Dir:           f.cleanPath(dir),
 		CacheModTime:  time.Now().UnixNano(),
 		CacheSize:     0,
 		CacheStorable: false,
 		CacheType:     "Object",
-		CacheTs:       time.Now(),
 	}
-
-	//fs.Debugf(f, "remote for '%v' is '%v'", remote, co.Remote())
 
 	co.cacheManager = NewManager(co)
 	return co
+}
+
+// ObjectFromOriginal builds one from a generic fs.Object
+func ObjectFromOriginal(f *Fs, o fs.Object) *Object {
+	var co *Object
+	fullRemote := path.Join(f.Root(), o.Remote())
+
+	// search in transient cache
+	if v, found := f.CacheInfo().Get(fullRemote); found {
+		ok := false
+		if co, ok = v.(*Object); ok && co != nil {
+			co.updateData(o)
+			return co
+		}
+	}
+
+	dir, name := path.Split(fullRemote)
+	co = &Object{
+		CacheFs:       f,
+		Name:          f.cleanPath(name),
+		Dir:           f.cleanPath(dir),
+		CacheType:     "Object",
+	}
+	co.updateData(o)
+	co.cacheManager = NewManager(co)
+	return co
+}
+
+// ObjectFromCacheOrSource builds one from a generic fs.Object
+func ObjectFromCacheOrSource(f *Fs, remote string, query GetObjectFromSource) (*Object, error) {
+	var co *Object
+	fullRemote := path.Join(f.Root(), remote)
+
+	if v, found := f.CacheInfo().Get(fullRemote); found {
+		ok := false
+		if co, ok = v.(*Object); ok && co != nil {
+			return co, nil
+		}
+	}
+
+	dir, name := path.Split(path.Join(f.Root(), remote))
+	co = &Object{
+		CacheFs:       f,
+		Name:          f.cleanPath(name),
+		Dir:           f.cleanPath(dir),
+		CacheType:     "Object",
+	}
+	co.cacheManager = NewManager(co)
+	err := f.cache.GetObject(co)
+	if err == nil {
+		co.Cache()
+		return co, nil
+	}
+
+	liveObject, err := query()
+	if err != nil || liveObject == nil {
+		return nil, err
+	}
+
+	co.updateData(liveObject)
+	co.Persist()
+	co.Cache()
+	return co, nil
+}
+
+func ObjectFromSource(f *Fs, remote string, query GetObjectFromSource) (*Object, error) {
+	dir, name := path.Split(path.Join(f.Root(), remote))
+	co := &Object{
+		CacheFs:       f,
+		Name:          f.cleanPath(name),
+		Dir:           f.cleanPath(dir),
+		CacheType:     "Object",
+	}
+	co.cacheManager = NewManager(co)
+
+	liveObject, err := query()
+	if err != nil || liveObject == nil {
+		return nil, err
+	}
+
+	co.updateData(liveObject)
+	co.Cache()
+	co.Persist()
+	return co, nil
 }
 
 func (o *Object) updateData(source fs.Object) {
@@ -78,7 +142,6 @@ func (o *Object) updateData(source fs.Object) {
 	o.CacheModTime = source.ModTime().UnixNano()
 	o.CacheSize = source.Size()
 	o.CacheStorable = source.Storable()
-	o.CacheTs = time.Now()
 	o.CacheHashes = make(map[fs.HashType]string)
 }
 
@@ -115,32 +178,17 @@ func (o *Object) Abs() string {
 
 // ModTime returns the cached ModTime
 func (o *Object) ModTime() time.Time {
-	o.RefreshFromCache()
 	return time.Unix(0, o.CacheModTime)
 }
 
 // Size returns the cached Size
 func (o *Object) Size() int64 {
-	o.RefreshFromCache()
 	return o.CacheSize
 }
 
 // Storable returns the cached Storable
 func (o *Object) Storable() bool {
-	o.RefreshFromCache()
 	return o.CacheStorable
-}
-
-// RefreshFromCache requests the original FS for the object in case it comes from a cached entry
-func (o *Object) RefreshFromCache() {
-	o.refreshMutex.Lock()
-	defer o.refreshMutex.Unlock()
-
-	err := o.CacheFs.cache.GetObject(o)
-	if err != nil {
-		fs.Errorf(o, "error refreshing cached object: %v", err)
-		return
-	}
 }
 
 // RefreshFromSource requests the original FS for the object in case it comes from a cached entry
@@ -161,11 +209,7 @@ func (o *Object) RefreshFromSource() error {
 	fs.Debugf(o.Fs(), "refreshed object %v", o)
 
 	o.updateData(liveObject)
-	err = o.CacheFs.cache.AddObject(o)
-	if err != nil {
-		fs.Errorf(o, "error caching refreshed object: %v", err)
-		return err
-	}
+	o.Persist()
 
 	return nil
 }
@@ -182,11 +226,7 @@ func (o *Object) SetModTime(t time.Time) error {
 	}
 
 	o.CacheModTime = t.UnixNano()
-	err = o.CacheFs.cache.AddObject(o)
-	if err != nil {
-		fs.Errorf(o, "error updating ModTime: %v", err)
-		return nil
-	}
+	o.Persist()
 	fs.Debugf(o.Fs(), "updated ModTime %v: %v", o, t)
 
 	return nil
@@ -209,14 +249,14 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	}
 
 	if !rangeFound {
-		fs.Errorf(o, "WARNING: reading object directly from source")
+		fs.Errorf(o, "WARNING: reading object directly from source: %#v", options)
 	}
 
 	return o.Object.Open(options...)
 }
 
 // Read is requested by fuse (most likely) for a specific chunk of the file
-func (o *Object) Read(reqSize, reqOffset int64) (respData []byte, err error) {
+func (o *Object) ReadBlockAt(reqSize, reqOffset int64) (respData []byte, err error) {
 	if err := o.RefreshFromSource(); err != nil {
 		return nil, err
 	}
@@ -234,12 +274,6 @@ func (o *Object) Read(reqSize, reqOffset int64) (respData []byte, err error) {
 func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	fs.Debugf(o.Fs(), "update data: %v", o)
 
-	//cachedObject, ok := src.(Object)
-	//if !ok {
-	//	fs.Errorf(o, "wrong object type update: %v", src)
-	//	return fs.ErrorCantSetModTime
-	//}
-
 	// TODO: do we do something more here?
 	if err := o.RefreshFromSource(); err != nil {
 		return err
@@ -253,13 +287,9 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 
 	o.CacheModTime = src.ModTime().UnixNano()
 	o.CacheSize = src.Size()
-	o.CacheTs = time.Now()
 	o.CacheHashes = make(map[fs.HashType]string)
 
-	err = o.CacheFs.cache.AddObject(o)
-	if err != nil {
-		fs.Errorf(o, "error updating object hash in cache: %v", err)
-	}
+	o.Persist()
 
 	return nil
 }
@@ -277,21 +307,13 @@ func (o *Object) Remove() error {
 		return err
 	}
 
-	// if the object was deleted from source we can clean up the cache too
-	err = o.CacheFs.Cache().RemoveObject(o)
-	if err != nil {
-		fs.Errorf(o, "error removing from cache: %v", err)
-		return nil
-	}
-
-	return nil
+	o.Flush()
+	return err
 }
 
 // Hash requests a hash of the object and stores in the cache
 // since it might or might not be called, this is lazy loaded
 func (o *Object) Hash(ht fs.HashType) (string, error) {
-	o.RefreshFromCache()
-
 	if o.CacheHashes == nil {
 		o.CacheHashes = make(map[fs.HashType]string)
 	}
@@ -312,18 +334,43 @@ func (o *Object) Hash(ht fs.HashType) (string, error) {
 	}
 
 	o.CacheHashes[ht] = liveHash
-	o.CacheTs = time.Now()
 
-	err = o.CacheFs.cache.AddObject(o)
-	if err != nil {
-		fs.Errorf(o, "error updating object hash in cache: %v", err)
-	}
+	o.Persist()
 	fs.Infof(o, "object hash cached: %v", liveHash)
 
 	return liveHash, nil
 }
 
+// Flush removes this object from caches
+func (o *Object) Flush() *Object {
+	o.CacheFs.CacheInfo().Delete(o.Abs())
+
+	// if the object was deleted from source we can clean up the cache too
+	err := o.CacheFs.Cache().RemoveObject(o)
+	if err != nil {
+		fs.Errorf(o, "error removing from cache: %v", err)
+		return nil
+	}
+
+	return o
+}
+
+// Cache adds this object to the transient cache
+func (o *Object) Cache() *Object {
+	o.CacheFs.CacheInfo().Set(o.Abs(), o, cache.DefaultExpiration)
+	return o
+}
+
+// Persist adds this object to the persistent cache
+func (o *Object) Persist() *Object {
+	err := o.CacheFs.Cache().AddObject(o)
+	if err != nil {
+		fs.Errorf(o, "failed to cache object: %v", err)
+	}
+	return o
+}
+
 var (
 	_ fs.Object           = (*Object)(nil)
-	_ fs.ObjectUnbuffered = (*Object)(nil)
+	_ fs.BlockReader = (*Object)(nil)
 )

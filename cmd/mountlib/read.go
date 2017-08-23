@@ -118,14 +118,9 @@ func (fh *ReadFileHandle) Read(reqSize, reqOffset int64) (respData []byte, err e
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 
-	if fh.o.Fs().Features().FileReadRaw {
-		obj, ok := fh.o.(fs.ObjectUnbuffered)
-
-		if ok {
-			return obj.Read(reqSize, reqOffset)
-		}
-
-		fs.Debugf(fh.o, "ReadFileHandle.Read no implementation for unbuffered reading: %d", reqOffset)
+	obj, ok := fh.o.(fs.BlockReader)
+	if ok {
+		return obj.ReadBlockAt(reqSize, reqOffset)
 	}
 
 	err = fh.openPending() // FIXME pending open could be more efficient in the presense of seek (and retried)

@@ -131,7 +131,7 @@ func (b *Bolt) getBucket(dir string, createIfMissing bool, tx *bolt.Tx) *bolt.Bu
 	return bucket
 }
 
-// updateChunkTs is a convenience method to update a chunk timestamp to mark it was used recently
+// updateChunkTs is a convenience method to update a chunk timestamp to mark that it was used recently
 func (b *Bolt) updateChunkTs(tx *bolt.Tx, path string, offset int64) {
 	tsBucket := tx.Bucket([]byte(TsBucket))
 	tsVal := path + "-" + strconv.FormatInt(offset, 10)
@@ -221,22 +221,24 @@ func (b *Bolt) GetDirEntries(cachedDir *Directory) (fs.DirEntries, error) {
 				}
 
 				metaKey := currentBucket.Get([]byte("."))
-				d := NewDirectoryEmpty(cachedDir.CacheFs, entryPath)
+				d := NewDirectory(cachedDir.CacheFs, entryPath)
 				if metaKey != nil { //if we don't find it, we create an empty dir
 					err := json.Unmarshal(metaKey, d)
 					if err != nil { // if even this fails, we fallback to an empty dir
 						fs.Debugf(string(k), "error during unmarshalling obj: %v", err)
 					}
 				}
+				d.Cache()
 
 				dirEntries = append(dirEntries, d)
 			} else { // object
-				o := NewObjectEmpty(cachedDir.CacheFs, entryPath)
+				o := NewObject(cachedDir.CacheFs, entryPath)
 				err := json.Unmarshal(v, o)
 				if err != nil {
 					fs.Debugf(string(k), "error during unmarshalling obj: %v", err)
 					continue
 				}
+				o.Cache()
 
 				dirEntries = append(dirEntries, o)
 			}
@@ -267,7 +269,7 @@ func (b *Bolt) AddDirEntries(cachedDir *Directory, entries fs.DirEntries) (fs.Di
 		for _, entry := range entries {
 			switch o := entry.(type) {
 			case fs.Object:
-				co := NewObject(cachedDir.CacheFs, o)
+				co := ObjectFromOriginal(cachedDir.CacheFs, o)
 
 				encoded, err := json.Marshal(co)
 				if err != nil {
@@ -281,14 +283,24 @@ func (b *Bolt) AddDirEntries(cachedDir *Directory, entries fs.DirEntries) (fs.Di
 
 				cachedEntries = append(cachedEntries, co)
 			case fs.Directory:
-				cd := NewDirectory(cachedDir.CacheFs, o)
+				cd := DirectoryFromOriginal(cachedDir.CacheFs, o)
+				cachedEntries = append(cachedEntries, cd)
 
-				_, err := bucket.CreateBucketIfNotExists([]byte(path.Base(cd.Abs())))
+				cdb, err := bucket.CreateBucketIfNotExists([]byte(path.Base(cd.Abs())))
 				if err != nil {
 					fs.Debugf(cd, "couldn't store dir: %v", err)
+					continue
 				}
 
-				cachedEntries = append(cachedEntries, cd)
+				encoded, err := json.Marshal(cd)
+				if err != nil {
+					fs.Debugf(cd, "couldn't marshal: %v", err)
+					continue
+				}
+				err = cdb.Put([]byte("."), encoded)
+				if err != nil {
+					fs.Debugf(cd, "couldn't cache dir meta: %v", err)
+				}
 			default:
 				return errors.Errorf("Unknown object type %T", entry)
 			}

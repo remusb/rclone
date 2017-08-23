@@ -162,11 +162,18 @@ type Info interface {
 	Features() *Features
 }
 
-// ObjectUnbuffered provides direct read/write capabilities from fuse
-type ObjectUnbuffered interface {
+// BlockReader reads object blocks with specific limits
+type BlockReader interface {
 	Object
 
-	Read(reqSize, reqOffset int64) (respData []byte, err error)
+	ReadBlockAt(reqSize, reqOffset int64) (respData []byte, err error)
+}
+
+// BlockReader reads object blocks with specific limits
+type BlockWriter interface {
+	Object
+
+	WriteBlockAt(reqSize, reqOffset int64) (respData []byte, err error)
 }
 
 // Object is a filesystem like object provided by an Fs
@@ -255,7 +262,6 @@ type Features struct {
 	DuplicateFiles  bool
 	ReadMimeType    bool
 	WriteMimeType   bool
-	FileReadRaw     bool
 
 	// Purge all files in the root and the root directory
 	//
@@ -410,7 +416,6 @@ func (ft *Features) Mask(f Fs) *Features {
 	ft.DuplicateFiles = ft.DuplicateFiles && mask.DuplicateFiles
 	ft.ReadMimeType = ft.ReadMimeType && mask.ReadMimeType
 	ft.WriteMimeType = ft.WriteMimeType && mask.WriteMimeType
-	ft.FileReadRaw = ft.FileReadRaw && mask.FileReadRaw
 	if mask.Purge == nil {
 		ft.Purge = nil
 	}

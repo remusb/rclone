@@ -6,10 +6,12 @@ import (
 	"os"
 	"path"
 	"strings"
-	"sync"
 
 	"github.com/ncw/rclone/fs"
+	"github.com/patrickmn/go-cache"
 )
+
+type GetEntriesFromSource func() (fs.DirEntries, error)
 
 // Directory is a generic dir that stores basic information about it
 type Directory struct {
@@ -23,20 +25,48 @@ type Directory struct {
 
 	CacheItems int64     `json:"items"`     // number of objects or -1 for unknown
 	CacheType  string    `json:"cacheType"` // object type
-	CacheTs    time.Time `json:"cacheTs"`   // cache timestamp
-
-	refreshMutex sync.Mutex
 }
 
-// NewDirectory builds one from a generic fs.Directory
-func NewDirectory(f *Fs, d fs.Directory) *Directory {
-	fullRemote := path.Join(f.Root(), d.Remote())
+// NewDirectory builds an empty dir which will be used to unmarshal data in it
+// caching must be managed at the location through Cache() or Persist()
+func NewDirectory(f *Fs, remote string) *Directory {
+	var cd *Directory
+	fullRemote := path.Join(f.Root(), remote)
+
+	// build a new one
 	dir := f.cleanPath(path.Dir(fullRemote))
 	name := f.cleanPath(path.Base(fullRemote))
+	cd = &Directory{
+		CacheFs:      f,
+		Name:         name,
+		Dir:          dir,
+		CacheModTime: time.Now().UnixNano(),
+		CacheSize:    0,
+		CacheItems:   0,
+		CacheType:    "Directory",
+	}
 
-	//fs.Debugf(f, "building %v/%v from %v", dir, name, d.Remote())
+	return cd
+}
 
-	cd := &Directory{
+// DirectoryFromOriginal builds one from a generic fs.Directory
+func DirectoryFromOriginal(f *Fs, d fs.Directory) *Directory {
+	var cd *Directory
+	fullRemote := path.Join(f.Root(), d.Remote())
+
+	if v, found := f.CacheInfo().Get(fullRemote); found {
+		ok := false
+		if cd, ok = v.(*Directory); ok && cd != nil {
+			cd.CacheModTime = d.ModTime().UnixNano()
+			cd.CacheItems = d.Items()
+			cd.CacheSize = d.Size()
+			return cd
+		}
+	}
+
+	dir := f.cleanPath(path.Dir(fullRemote))
+	name := f.cleanPath(path.Base(fullRemote))
+	cd = &Directory{
 		Directory:    d,
 		CacheFs:      f,
 		Name:         name,
@@ -45,22 +75,28 @@ func NewDirectory(f *Fs, d fs.Directory) *Directory {
 		CacheSize:    d.Size(),
 		CacheItems:   d.Items(),
 		CacheType:    "Directory",
-		CacheTs:      time.Now(),
 	}
 
-	//fs.Debugf(f, "remote for %v is %v", d.Remote(), cd.Remote())
 	return cd
 }
 
-// NewDirectoryEmpty builds one from a generic fs.Directory
-func NewDirectoryEmpty(f *Fs, remote string) *Directory {
+// DirectoryFromCacheOrNew searches for a dir in the cache or builds a new one
+func DirectoryFromCacheOrNew(f *Fs, remote string) *Directory {
+	var cd *Directory
 	fullRemote := path.Join(f.Root(), remote)
+
+	// search in transient cache
+	if v, found := f.CacheInfo().Get(fullRemote); found {
+		ok := false
+		if cd, ok = v.(*Directory); ok && cd != nil {
+			return cd
+		}
+	}
+
+	// build a new one
 	dir := f.cleanPath(path.Dir(fullRemote))
 	name := f.cleanPath(path.Base(fullRemote))
-
-	//fs.Debugf(f, "building '%v'/'%v' from '%v'", dir, name, remote)
-
-	cd := &Directory{
+	cd = &Directory{
 		CacheFs:      f,
 		Name:         name,
 		Dir:          dir,
@@ -68,10 +104,15 @@ func NewDirectoryEmpty(f *Fs, remote string) *Directory {
 		CacheSize:    0,
 		CacheItems:   0,
 		CacheType:    "Directory",
-		CacheTs:      time.Now(),
 	}
 
-	//fs.Debugf(f, "remote for '%v' is '%v'", remote, cd.Remote())
+	// search in persistent cache or ignore and return the empty one
+	err := f.Cache().GetDir(cd)
+	if err != nil {
+		cd.Persist()
+	}
+
+	cd.Cache()
 	return cd
 }
 
@@ -108,32 +149,70 @@ func (d *Directory) Abs() string {
 
 // ModTime returns the cached ModTime
 func (d *Directory) ModTime() time.Time {
-	d.RefreshFromCache()
 	return time.Unix(0, d.CacheModTime)
 }
 
 // Size returns the cached Size
 func (d *Directory) Size() int64 {
-	d.RefreshFromCache()
 	return d.CacheSize
 }
 
 // Items returns the cached Items
 func (d *Directory) Items() int64 {
-	d.RefreshFromCache()
 	return d.CacheItems
 }
 
-// RefreshFromCache requests the original FS for the object in case it comes from a cached entry
-func (d *Directory) RefreshFromCache() {
-	d.refreshMutex.Lock()
-	defer d.refreshMutex.Unlock()
+// GetEntries retrieves all this dir entries from the source
+func (d *Directory) GetEntries(query GetEntriesFromSource) (fs.DirEntries, error) {
+	var entries fs.DirEntries
+	var err error
 
-	err := d.CacheFs.cache.GetDir(d)
+	entries, err = d.CacheFs.Cache().GetDirEntries(d)
 	if err != nil {
-		fs.Errorf(d, "error refreshing cached dir: %v", err)
-		return
+		fs.Debugf(d, "no dir entries in cache: %v", err)
+	} else if len(entries) == 0 {
+		// TODO: read empty dirs from source?
+	} else {
+		return entries, nil
 	}
+
+	entries, err = query()
+	if err != nil {
+		return nil, err
+	}
+
+	// We used the source so let's cache the result for later usage
+	cachedEntries, err := d.CacheFs.Cache().AddDirEntries(d, entries)
+	if err != nil {
+		fs.Errorf(d, "error caching dir entries: %v", err)
+		return entries, nil
+	}
+
+	return cachedEntries, nil
+}
+
+// Remove deletes the dir from all caches
+func (d *Directory) Flush() {
+	d.CacheFs.CacheInfo().Delete(d.Abs())
+	err := d.CacheFs.Cache().RemoveDir(d)
+	if err != nil {
+		fs.Errorf(d.Abs(), "error removing cached dir: %v", err)
+	}
+}
+
+// Cache adds this dir to the transient cache
+func (d *Directory) Cache() *Directory {
+	d.CacheFs.CacheInfo().Set(d.Abs(), d, cache.DefaultExpiration)
+	return d
+}
+
+// Persist adds this dir to the persistent cache
+func (d *Directory) Persist() *Directory {
+	err := d.CacheFs.Cache().AddDir(d)
+	if err != nil {
+		fs.Errorf(d, "failed to cache dir: %v", err)
+	}
+	return d
 }
 
 var (
