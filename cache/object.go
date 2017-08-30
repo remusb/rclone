@@ -31,7 +31,6 @@ type Object struct {
 	CacheType   string                 `json:"cacheType"`
 
 	refreshMutex sync.Mutex
-	cacheManager *Manager
 }
 
 // NewObject builds one from a generic fs.Object
@@ -49,7 +48,6 @@ func NewObject(f *Fs, remote string) *Object {
 		CacheType:     "Object",
 	}
 
-	co.cacheManager = NewManager(co)
 	return co
 }
 
@@ -75,7 +73,6 @@ func ObjectFromOriginal(f *Fs, o fs.Object) *Object {
 		CacheType:     "Object",
 	}
 	co.updateData(o)
-	co.cacheManager = NewManager(co)
 	return co
 }
 
@@ -98,7 +95,6 @@ func ObjectFromCacheOrSource(f *Fs, remote string, query GetObjectFromSource) (*
 		Dir:           f.cleanPath(dir),
 		CacheType:     "Object",
 	}
-	co.cacheManager = NewManager(co)
 	err := f.cache.GetObject(co)
 	if err == nil {
 		co.Cache()
@@ -124,7 +120,6 @@ func ObjectFromSource(f *Fs, remote string, query GetObjectFromSource) (*Object,
 		Dir:           f.cleanPath(dir),
 		CacheType:     "Object",
 	}
-	co.cacheManager = NewManager(co)
 
 	liveObject, err := query()
 	if err != nil || liveObject == nil {
@@ -239,36 +234,45 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 		return nil, err
 	}
 
+	fs.Errorf(o, "WARNING: opening object: %#v", options)
+
 	rangeFound := false
+	cacheReader := NewReader(o)
 
 	for _, option := range options {
-		switch option.(type) {
+		switch x := option.(type) {
 		case *fs.RangeOption:
 			rangeFound = true
+		case *fs.SeekOption:
+			cacheReader.Seek(x.Offset, os.SEEK_SET)
 		}
 	}
 
 	if !rangeFound {
-		fs.Errorf(o, "WARNING: reading object directly from source: %#v", options)
+		//fs.Errorf(o, "WARNING: reading object directly from source: %#v", options)
 	}
 
-	return o.Object.Open(options...)
+	//return o.Object.Open(options...)
+	return cacheReader, nil
 }
 
 // Read is requested by fuse (most likely) for a specific chunk of the file
-func (o *Object) ReadBlockAt(reqSize, reqOffset int64) (respData []byte, err error) {
-	if err := o.RefreshFromSource(); err != nil {
-		return nil, err
-	}
-
-	reqEnd := reqOffset + reqSize
-	if reqEnd > o.Object.Size() {
-		reqEnd = o.Object.Size()
-	}
-
-	go o.cacheManager.StartWorkers(reqOffset)
-	return o.cacheManager.GetChunk(reqOffset, reqEnd)
-}
+//func (o *Object) ReadBlockAt(reqSize, reqOffset int64) (respData []byte, err error) {
+//	if err := o.RefreshFromSource(); err != nil {
+//		return nil, err
+//	}
+//
+//	o.cacheManager = NewManager(o)
+//
+//	reqEnd := reqOffset + reqSize
+//	if reqEnd > o.Object.Size() {
+//		reqEnd = o.Object.Size()
+//	}
+//
+//	o.cacheManager.Seek(reqOffset, os.SEEK_SET)
+//	go o.cacheManager.StartWorkers()
+//	return o.cacheManager.GetChunk(reqOffset, reqEnd)
+//}
 
 // Update will change the object data
 func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
@@ -372,5 +376,5 @@ func (o *Object) Persist() *Object {
 
 var (
 	_ fs.Object           = (*Object)(nil)
-	_ fs.BlockReader = (*Object)(nil)
+	//_ fs.BlockReader 			= (*Object)(nil)
 )

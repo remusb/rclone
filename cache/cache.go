@@ -192,7 +192,6 @@ type Fs struct {
 	features      *fs.Features // optional features
 	cache         Storage
 	cacheInfo     *cache.Cache
-	memory        ChunkStorage
 
 	listAge       time.Duration
 	fileAge       time.Duration
@@ -269,13 +268,10 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		fs.Debugf(name, "Purging the DB")
 	}
 
-	m := NewMemory(chunkCleanDuration)
-
 	f := &Fs{
 		Fs:            wrappedFs,
 		name:          name,
 		root:          rpath,
-		memory:        m,
 		listAge:       listDuration,
 		fileAge:       fileDuration,
 		chunkSize:     int64(chunkSize),
@@ -351,11 +347,6 @@ func (f *Fs) Cache() Storage {
 // Cache is the persistent type cache
 func (f *Fs) CacheInfo() *cache.Cache {
 	return f.cacheInfo
-}
-
-// Memory is the transient type cache
-func (f *Fs) Memory() ChunkStorage {
-	return f.memory
 }
 
 // NewObject finds the Object at remote.
@@ -674,7 +665,6 @@ func (f *Fs) cleanUpCache() {
 	//f.cache.Stats()
 
 	fs.Debugf("cache", "starting memory cleanup")
-	f.memory.CleanChunksByAge(f.chunkCleanAge)
 
 	f.lastCleanup = time.Now()
 	return
@@ -697,17 +687,6 @@ func (f *Fs) cleanPath(p string) string {
 	}
 
 	return p
-}
-
-func (f *Fs) addOrUpdateCacheInfo(p string) error {
-	var err error
-
-	err = f.cacheInfo.Add(p, true, cache.DefaultExpiration)
-	if err != nil {
-		err = f.cacheInfo.Replace(p, true, cache.DefaultExpiration)
-	}
-
-	return err
 }
 
 // Check the interfaces are satisfied

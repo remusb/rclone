@@ -2,34 +2,54 @@ package cache
 
 import (
 	"io"
-	"path"
-
-	"sync"
 	"time"
-
 	"github.com/ncw/rclone/fs"
-	"github.com/pkg/errors"
+	"path"
+	"sync"
+	"os"
+	"fmt"
 )
 
 // Manager is managing the chunk retrieval from both source and cache for a single object
 type Manager struct {
 	CachedObject    *Object
-	FileName        string
+	CachedReader		*Reader
 	ReadRetries     int
 	DownloadRetries int
 	TotalWorkers    int
-	workerGroup     sync.WaitGroup
+
+	offsetQueue 		chan int64
+	workers					[]*worker
+	offset					int64
+	running					struct{ sync.Mutex; r bool }
 }
 
 // NewManager returns a simple manager
-func NewManager(o *Object) *Manager {
-	return &Manager{
+func NewManager(o *Object, r *Reader) *Manager {
+	m := &Manager{
 		CachedObject:    o,
-		FileName:        path.Base(o.Remote()),
+		CachedReader:		 r,
 		ReadRetries:     5,
 		DownloadRetries: 3,
-		TotalWorkers:    4,
+		TotalWorkers:    8,
+		running:				 struct{ sync.Mutex; r bool }{r: true},
+		offset:					 0,
 	}
+
+	m.offsetQueue = make(chan int64, m.TotalWorkers)
+	for i := 0; i < m.TotalWorkers; i++ {
+		w := &worker{
+			m:	m,
+			ch: m.offsetQueue,
+			id: i+1,
+		}
+		go w.run()
+
+		m.workers = append(m.workers, w)
+	}
+	go m.Start()
+
+	return m
 }
 
 // CacheFs is a convenience method to get the parent cache FS of the object's manager
@@ -44,185 +64,197 @@ func (m *Manager) Storage() Storage {
 
 // Memory is a convenience method to get the transient storage of the object's manager
 func (m *Manager) Memory() ChunkStorage {
-	return m.CacheFs().Memory()
+	return m.CachedReader.Memory()
 }
 
-// DownloadWorker is a single routine that downloads a single chunk and stores in both transient and persistent storage
-func (m *Manager) DownloadWorker(chunkStart int64) {
-	var err error
-	var reader io.ReadCloser
-	chunkEnd := chunkStart + m.CacheFs().chunkSize
+// Memory is a convenience method to get the transient storage of the object's manager
+func (m *Manager) String() string {
+	return path.Base(m.CachedObject.Abs())
+}
 
-	defer m.workerGroup.Done()
+func (m *Manager) syncWithReader() {
+	readerOffset := <-m.CachedReader.preloadQueue
+	m.offset = readerOffset
+	//readerOffset := m.CachedReader.Offset()
+	//readerOffset = readerOffset - (readerOffset % m.CacheFs().chunkSize)
+	//limitOffset := m.CacheFs().chunkSize
+	//
+	//if readerOffset >= limitOffset && (m.offset <= readerOffset - limitOffset || m.offset > readerOffset + limitOffset) {
+	//	fs.Debugf(m, "preloader aligned %v -> %v", m.offset, readerOffset - m.CacheFs().chunkSize)
+	//	m.offset = readerOffset - m.CacheFs().chunkSize
+	//}
+}
 
-	// align the EOF
-	if chunkEnd > m.CachedObject.Size() {
-		chunkEnd = m.CachedObject.Size()
+func (m *Manager) run(offset int64) bool {
+	//offset = offset - (offset % m.CacheFs().chunkSize)
+
+	// we reached the end of the file
+	if offset < 0 || offset >= m.CachedObject.Size() {
+		//fs.Debugf(m, "preloader reached EOF %v", offset)
+		return false
 	}
 
-	for retry := 0; retry < m.DownloadRetries; retry++ {
-		reader, err = m.CachedObject.Open(&fs.SeekOption{Offset: chunkStart}, &fs.RangeOption{Start: chunkStart, End: chunkEnd})
-
-		if err != nil {
-			time.Sleep(time.Second)
-			continue
-		}
-
-		break
+	// search the storage queue
+	if !m.Memory().HasChunk(m.CachedObject, offset) {
+		fs.Debugf(m, "preloader needs %v", offset)
+		m.offsetQueue <- offset
 	}
 
-	// we seem to be getting only errors so we abort
-	if err != nil {
-		fs.Errorf(m.FileName, "object open failed %v: %v", chunkStart, err)
-		return
-	}
-
-	data := make([]byte, chunkEnd-chunkStart)
-	_, err = reader.Read(data)
-	if err != nil {
-		fs.Errorf(m.FileName, "failed to read chunk %v: %v", chunkStart, err)
-	}
-	err = reader.Close()
-	if err != nil {
-		fs.Errorf(m.FileName, "failed to close reader for %v: %v", chunkStart, err)
-	}
-
-	err = m.Memory().AddChunk(m.CachedObject, data, chunkStart)
-	if err != nil {
-		fs.Errorf(m.FileName, "failed caching chunk in ram %v: %v", chunkStart, err)
-	}
-	err = m.Storage().AddChunk(m.CachedObject, data, chunkStart)
-	if err != nil {
-		fs.Errorf(m.FileName, "failed caching chunk in storage %v: %v", chunkStart, err)
-	}
+	//m.offset += m.CacheFs().chunkSize
+	return true
 }
 
 // StartWorkers will start TotalWorkers which will download chunks and store them in cache
-func (m *Manager) StartWorkers(chunkStart int64) {
-	m.workerGroup.Wait()
+func (m *Manager) Start() {
+	//fs.Infof(m, "starting %v workers", m.TotalWorkers)
 
-	workers := 0
-	offset := chunkStart % m.CacheFs().chunkSize
-	chunkStart = chunkStart - offset
+	for i := 0; i < m.TotalWorkers; i++ {
+		m.run(m.offset + m.CacheFs().chunkSize*int64(i))
+	}
 
 	for {
-		if workers >= m.TotalWorkers {
+		m.syncWithReader()
+		if !m.Running() {
 			break
 		}
 
-		newOffset := chunkStart + (m.CacheFs().chunkSize * int64(workers))
-
-		// we reached the end of the file
-		if newOffset >= m.CachedObject.Size() {
-			break
+		for i := 0; i < m.TotalWorkers; i++ {
+			m.run(m.offset + m.CacheFs().chunkSize*int64(i-1))
 		}
+	}
 
-		// search the storage queue
-		if m.Memory().HasChunk(m.CachedObject, newOffset) || m.Storage().HasChunk(m.CachedObject, newOffset) {
-			workers++
-			continue
-		}
+	m.Stop()
+}
 
-		// fetch from source
-		m.workerGroup.Add(1)
-		go m.DownloadWorker(newOffset)
-		workers++
+func (m *Manager) Running() bool {
+	m.running.Lock()
+	defer m.running.Unlock()
+	return m.running.r
+}
+
+func (m *Manager) Stop() {
+	if !m.Running() {
+		return
+	}
+
+	//debug.PrintStack()
+	fs.Infof(m, "stopping workers")
+
+	m.running.Lock()
+	m.running.r = false
+	m.running.Unlock()
+
+	for i := 0; i < m.TotalWorkers; i++ {
+		m.offsetQueue <- -1
 	}
 }
 
-// GetChunk is called by the FS to retrieve a specific chunk of known start and size from where it can find it
-// it can be from transient or persistent cache
-// it will also build the chunk from the cache's specific chunk boundaries and build the final desired chunk in a buffer
-func (m *Manager) GetChunk(chunkStart, chunkEnd int64) ([]byte, error) {
-	fs.Infof(m.FileName, "reading chunk %v-%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(chunkEnd))
+type worker struct {
+	m		*Manager
+	ch <-chan int64
+	rc	io.ReadCloser
+	id	int
+}
 
-	reqSize := chunkEnd - chunkStart
-	buffer := make([]byte, 0, reqSize)
-	var data []byte
+func (w *worker) String() string {
+	return fmt.Sprintf("worker-%v <%v>", w.id, w.m.CachedObject.Name)
+}
+
+func (w *worker) Reader(offset int64) (io.ReadCloser, error) {
 	var err error
 
-	// we calculate the modulus of the requested offset with the size of a chunk
-	offset := chunkStart % m.CacheFs().chunkSize
-
-	// we align the start offset of the first chunk to a likely chunk in the storage
-	// if it's 0, even better, nothing changes
-	// if it's >0, we'll read from the start of the chunk and we'll need to trim the offsetMod bytes from it after EOF
-	chunkStart = chunkStart - offset
-
-	// delete old chunks from RAM
-	go m.Memory().CleanChunksByNeed(chunkStart)
-
-	for {
-		// we reached the end of the file
-		if chunkStart >= m.CachedObject.Size() {
-			fs.Debugf(m.FileName, "reached EOF %v", chunkStart)
-			break
-		}
-
-		found := false
-		data, err = m.Memory().GetChunk(m.CachedObject, chunkStart)
-		if err == nil {
-			found = true
-			fs.Infof(m.FileName, "chunk read from ram cache %v-%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(len(data)))
-		}
-
-		start := time.Now()
-		if !found {
-			// we're gonna give the workers a chance to pickup the chunk
-			// and retry a couple of times
-			for i := 0; i < m.ReadRetries; i++ {
-				data, err = m.Storage().GetChunk(m.CachedObject, chunkStart)
-
-				if err == nil {
-					fs.Infof(m.FileName, "%v: chunk read from storage cache: %v", chunkStart, fs.SizeSuffix(len(data)))
-					found = true
-					break
-				}
-
-				fs.Debugf(m.FileName, "%v: chunk retry storage: %v", chunkStart, i)
-				time.Sleep(time.Second)
-			}
-		}
-
-		elapsed := time.Since(start)
-		if elapsed > time.Second {
-			fs.Debugf(m.FileName, "%v: chunk search storage: %s", chunkStart, elapsed)
-		}
-
-		// not found in ram or
-		// the worker didn't managed to download the chunk in time so we abort and close the stream
-		if err != nil || len(data) == 0 || !found {
-			return nil, errors.Errorf("chunk not found %v", chunkStart)
-		}
-
-		// TODO: maybe a more efficient way to do this?
-		// first chunk will be aligned with the start
-		if offset > 0 {
-			fs.Debugf(m.FileName, "chunk start align %v->%v", fs.SizeSuffix(chunkStart), fs.SizeSuffix(chunkStart+offset))
-			data = data[int(offset):]
-		}
-
-		// every chunk will be checked for the end
-		dataSize := int64(len(data))
-		totalBufferSize := int64(len(buffer))
-		if totalBufferSize+dataSize > reqSize {
-			dataSize = reqSize - totalBufferSize
-			fs.Debugf(m.FileName, "chunk end align %v->%v", fs.SizeSuffix(chunkStart+offset+int64(len(data))), fs.SizeSuffix(chunkStart+offset+dataSize))
-			data = data[0:dataSize]
-		}
-
-		buffer = append(buffer, data...)
-		totalBufferSize = int64(len(buffer))
-
-		if totalBufferSize >= reqSize {
-			fs.Infof(m.FileName, "chunk wrote to stream %v: %v", chunkStart, fs.SizeSuffix(totalBufferSize).String())
-			break
-		}
-
-		// we move forward for the next chunk
-		chunkStart = chunkStart + m.CacheFs().chunkSize
-		offset = 0
+	r := w.rc
+	if w.rc == nil {
+		r, err = w.m.CachedObject.Object.Open(&fs.SeekOption{Offset: offset})
+	}
+	if err != nil {
+		return nil, err
 	}
 
-	return buffer, nil
+	seekerObj, ok := r.(io.Seeker)
+	if ok {
+		_, err := seekerObj.Seek(offset, os.SEEK_SET)
+		return r, err
+	}
+	if w.rc != nil {
+		_ = w.rc.Close()
+		r, err = w.m.CachedObject.Object.Open(&fs.SeekOption{Offset: offset})
+		return r, err
+	}
+
+	return r, nil
+}
+
+// DownloadWorker is a single routine that downloads a single chunk and stores in both transient and persistent storage
+func (w *worker) run() {
+	var err error
+	var data []byte
+	//seeker := false
+	w.rc, err = w.m.CachedObject.Object.Open()
+	if err != nil {
+		fs.Errorf(w, "worker error: %v", err)
+		w.rc = nil
+	}
+
+	fs.Infof(w, "worker started. Reader Open: %v", w.rc != nil)
+
+	for {
+		chunkStart := <-w.ch
+		if chunkStart < 0 {
+			if w.rc != nil {
+				_ = w.rc.Close()
+			}
+			break
+		}
+
+		data, err = w.m.Storage().GetChunk(w.m.CachedObject, chunkStart)
+		if err == nil {
+			err = w.m.Memory().AddChunk(w.m.CachedObject, data, chunkStart)
+			if err != nil {
+				fs.Errorf(w, "failed caching chunk in ram %v: %v", chunkStart, err)
+			} else {
+				continue
+			}
+		}
+		err = nil
+
+		chunkEnd := chunkStart+w.m.CacheFs().chunkSize
+		if chunkEnd > chunkStart+w.m.CachedObject.Size() {
+			chunkEnd = w.m.CachedObject.Size()
+		}
+		for retry := 0; retry < w.m.DownloadRetries; retry++ {
+			w.rc, err = w.Reader(chunkStart)
+			if err != nil {
+				time.Sleep(time.Second)
+				continue
+			}
+
+			break
+		}
+
+		// we seem to be getting only errors so we abort
+		if err != nil {
+			fs.Errorf(w, "object open failed %v: %v", chunkStart, err)
+			continue
+		}
+
+		data = make([]byte, chunkEnd - chunkStart)
+
+		sourceRead := 0
+		sourceRead, err = io.ReadFull(w.rc, data)
+		if err != nil && err != io.EOF  {
+			fs.Errorf(w, "failed to read chunk %v: %v", chunkStart, err)
+		}
+		data = data[:sourceRead] // reslice to remove extra garbage
+
+		err = w.m.Memory().AddChunk(w.m.CachedObject, data, chunkStart)
+		if err != nil {
+			fs.Errorf(w, "failed caching chunk in ram %v: %v", chunkStart, err)
+		}
+
+		err = w.m.Storage().AddChunk(w.m.CachedObject, data, chunkStart)
+		if err != nil {
+			fs.Errorf(w, "failed caching chunk in storage %v: %v", chunkStart, err)
+		}
+	}
 }

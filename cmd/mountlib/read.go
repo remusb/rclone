@@ -117,12 +117,6 @@ func (fh *ReadFileHandle) seek(offset int64, reopen bool) (err error) {
 func (fh *ReadFileHandle) Read(reqSize, reqOffset int64) (respData []byte, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-
-	obj, ok := fh.o.(fs.BlockReader)
-	if ok {
-		return obj.ReadBlockAt(reqSize, reqOffset)
-	}
-
 	err = fh.openPending() // FIXME pending open could be more efficient in the presense of seek (and retried)
 	if err != nil {
 		return nil, err
