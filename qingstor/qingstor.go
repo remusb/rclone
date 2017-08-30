@@ -240,7 +240,11 @@ func NewFs(name, root string) (fs.Fs, error) {
 		bucket: bucket,
 		svc:    svc,
 	}
-	f.features = (&fs.Features{ReadMimeType: true, WriteMimeType: true}).Fill(f)
+	f.features = (&fs.Features{
+		ReadMimeType:  true,
+		WriteMimeType: true,
+		BucketBased:   true,
+	}).Fill(f)
 
 	if f.root != "" {
 		if !strings.HasSuffix(f.root, "/") {
@@ -850,7 +854,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 			fs.Errorf(o, "Create Object Faild, API ERROR: %v", err)
 			// Abort Upload when init success and upload failed
 			if uploadID != nil {
-				fs.Debugf(o, "Abort Upload Multipart, upload_id: %s, objectParts: %s", *uploadID, objectParts)
+				fs.Debugf(o, "Abort Upload Multipart, upload_id: %s, objectParts: %+v", *uploadID, objectParts)
 				abortReq := qs.AbortMultipartUploadInput{
 					UploadID: uploadID,
 				}
@@ -904,7 +908,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	}
 
 	// Complete Multipart Upload
-	fs.Debugf(o, "Complete Upload Multipart, upload_id: %s, objectParts: %d", *uploadID, objectParts)
+	fs.Debugf(o, "Complete Upload Multipart, upload_id: %s, objectParts: %d", *uploadID, len(objectParts))
 	completeReq := qs.CompleteMultipartUploadInput{
 		UploadID:    uploadID,
 		ObjectParts: objectParts,

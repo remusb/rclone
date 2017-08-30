@@ -5,7 +5,6 @@
 package sftp
 
 import (
-	"context"
 	"io"
 	"io/ioutil"
 	"os"
@@ -20,6 +19,7 @@ import (
 	"github.com/pkg/sftp"
 	"github.com/xanzy/ssh-agent"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/net/context"
 	"golang.org/x/time/rate"
 )
 
@@ -290,7 +290,9 @@ func NewFs(name, root string) (fs.Fs, error) {
 		mkdirLock: newStringLock(),
 		connLimit: rate.NewLimiter(rate.Limit(connectionsPerSecond), 1),
 	}
-	f.features = (&fs.Features{}).Fill(f)
+	f.features = (&fs.Features{
+		CanHaveEmptyDirectories: true,
+	}).Fill(f)
 	// Make a connection and pool it to return errors early
 	c, err := f.getSftpConnection()
 	if err != nil {

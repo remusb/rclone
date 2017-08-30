@@ -214,7 +214,11 @@ func NewFs(name, root string) (fs.Fs, error) {
 		pacer:       pacer.New().SetMinSleep(minSleep).SetMaxSleep(maxSleep).SetDecayConstant(decayConstant),
 		uploadToken: pacer.NewTokenDispenser(fs.Config.Transfers),
 	}
-	f.features = (&fs.Features{ReadMimeType: true, WriteMimeType: true}).Fill(f)
+	f.features = (&fs.Features{
+		ReadMimeType:  true,
+		WriteMimeType: true,
+		BucketBased:   true,
+	}).Fill(f)
 	if f.root != "" {
 		f.root += "/"
 		// Check to see if the (container,directory) is actually an existing file
@@ -418,7 +422,12 @@ func (f *Fs) listContainers(dir string) (entries fs.DirEntries, err error) {
 		return nil, fs.ErrorListBucketRequired
 	}
 	err = f.listContainersToFn(func(container *storage.Container) error {
-		d := fs.NewDir(container.Name, time.Time{})
+		t, err := time.Parse(time.RFC1123, container.Properties.LastModified)
+		if err != nil {
+			fs.Debugf(f, "Failed to parse LastModified %q: %v", container.Properties.LastModified, err)
+			t = time.Time{}
+		}
+		d := fs.NewDir(container.Name, t)
 		entries = append(entries, d)
 		return nil
 	})

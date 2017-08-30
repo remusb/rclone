@@ -8,8 +8,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -26,8 +28,6 @@ const (
 
 // Globals
 var (
-	// UserAgent set in the default Transport
-	UserAgent = "rclone/" + Version
 	// Filesystem registry
 	fsRegistry []*RegInfo
 	// ErrorNotFoundInConfigFile is returned by NewFs if not found in config file
@@ -47,6 +47,7 @@ var (
 	ErrorIsFile                      = errors.New("is a file not a directory")
 	ErrorNotAFile                    = errors.New("is a not a regular file")
 	ErrorNotDeleting                 = errors.New("not deleting files as there were IO errors")
+	ErrorNotDeletingDirs             = errors.New("not deleting directories as there were IO errors")
 	ErrorCantMoveOverlapping         = errors.New("can't move files on overlapping remotes")
 	ErrorDirectoryNotEmpty           = errors.New("directory not empty")
 )
@@ -243,11 +244,13 @@ type ListRFn func(dir string, callback ListRCallback) error
 
 // Features describe the optional features of the Fs
 type Features struct {
-	// Feature flags
-	CaseInsensitive bool
-	DuplicateFiles  bool
-	ReadMimeType    bool
-	WriteMimeType   bool
+	// Feature flags, whether Fs
+	CaseInsensitive         bool // has case insensitive files
+	DuplicateFiles          bool // allows duplicate files
+	ReadMimeType            bool // can read the mime type of objects
+	WriteMimeType           bool // can set the mime type of objects
+	CanHaveEmptyDirectories bool // can have empty directories
+	BucketBased             bool // is bucket based (like s3, swift etc)
 
 	// Purge all files in the root and the root directory
 	//
@@ -347,6 +350,46 @@ type Features struct {
 	ListR ListRFn
 }
 
+// Disable nil's out the named feature.  If it isn't found then it
+// will log a message.
+func (ft *Features) Disable(name string) *Features {
+	v := reflect.ValueOf(ft).Elem()
+	vType := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		vName := vType.Field(i).Name
+		field := v.Field(i)
+		if strings.EqualFold(name, vName) {
+			if !field.CanSet() {
+				Errorf(nil, "Can't set Feature %q", name)
+			} else {
+				zero := reflect.Zero(field.Type())
+				field.Set(zero)
+				Debugf(nil, "Reset feature %q", name)
+			}
+		}
+	}
+	return ft
+}
+
+// List returns a slice of all the possible feature names
+func (ft *Features) List() (out []string) {
+	v := reflect.ValueOf(ft).Elem()
+	vType := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		out = append(out, vType.Field(i).Name)
+	}
+	return out
+}
+
+// DisableList nil's out the comma separated list of named features.
+// If it isn't found then it will log a message.
+func (ft *Features) DisableList(list []string) *Features {
+	for _, feature := range list {
+		ft.Disable(strings.TrimSpace(feature))
+	}
+	return ft
+}
+
 // Fill fills in the function pointers in the Features struct from the
 // optional interfaces.  It returns the original updated Features
 // struct passed in.
@@ -387,7 +430,7 @@ func (ft *Features) Fill(f Fs) *Features {
 	if do, ok := f.(ListRer); ok {
 		ft.ListR = do.ListR
 	}
-	return ft
+	return ft.DisableList(Config.DisableFeatures)
 }
 
 // Mask the Features with the Fs passed in
@@ -402,6 +445,8 @@ func (ft *Features) Mask(f Fs) *Features {
 	ft.DuplicateFiles = ft.DuplicateFiles && mask.DuplicateFiles
 	ft.ReadMimeType = ft.ReadMimeType && mask.ReadMimeType
 	ft.WriteMimeType = ft.WriteMimeType && mask.WriteMimeType
+	ft.CanHaveEmptyDirectories = ft.CanHaveEmptyDirectories && mask.CanHaveEmptyDirectories
+	ft.BucketBased = ft.BucketBased && mask.BucketBased
 	if mask.Purge == nil {
 		ft.Purge = nil
 	}
@@ -438,7 +483,7 @@ func (ft *Features) Mask(f Fs) *Features {
 	if mask.ListR == nil {
 		ft.ListR = nil
 	}
-	return ft
+	return ft.DisableList(Config.DisableFeatures)
 }
 
 // Wrap makes a Copy of the features passed in, overriding the UnWrap
