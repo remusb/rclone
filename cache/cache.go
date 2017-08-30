@@ -11,28 +11,38 @@ import (
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
 	"github.com/patrickmn/go-cache"
+	"strconv"
 )
 
 const (
 	// DefCacheChunkSize is the default value for chunk size
 	DefCacheChunkSize = "5M"
-	// DefCacheListAge is the default value for directory listings age
-	DefCacheListAge = "5m"
 	// DefCacheFileAge is the default value for object info age
 	DefCacheFileAge = "5m"
 	// DefCacheChunkCleanAge is the default value for chunk age duration
-	DefCacheChunkCleanAge = "2m"
+	DefCacheChunkAge = "2m"
+	// DefCacheReadRetries is the default value for read retries
+	DefCacheReadRetries = 5
+	// DefCacheDownloadRetries is the default value for download retries
+	DefCacheDownloadRetries = 3
+	// DefCacheTotalWorkers is how many workers run in parallel to download chunks
+	DefCacheTotalWorkers = 8
+	// DefCacheChunkMemory will enable or disable in-memory storage for chunks
+	DefCacheChunkMemory = false
 )
 
 // Globals
 var (
 	// Flags
-	cacheDbPath        = fs.StringP("cache-db-path", "", path.Dir(fs.ConfigPath), "Directory to cache DB")
-	cacheDbPurge       = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
-	cacheChunkSize     = fs.SizeSuffix(-1)
-	cacheListAge       = fs.StringP("cache-dir-list-age", "", "", "How much time should directory listings be stored in cache")
-	cacheFileAge       = fs.StringP("cache-file-info-age", "", "", "How much time should object info be stored in cache")
-	cacheChunkCleanAge = fs.StringP("cache-chunk-clean-age", "", "", "How much time should a chunk be in cache before cleanup")
+	cacheDbPath        		 = fs.StringP("cache-db-path", "", path.Dir(fs.ConfigPath), "Directory to cache DB")
+	cacheDbPurge       		 = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
+	cacheChunkSize     		 = fs.StringP("cache-chunk-size", "", DefCacheChunkSize, "The size of a chunk")
+	cacheFileAge       		 = fs.StringP("cache-file-info-age", "", DefCacheFileAge, "How much time should object info be stored in cache")
+	cacheChunkAge 				 = fs.StringP("cache-chunk-age", "", DefCacheChunkAge, "How much time should a chunk be in cache before cleanup")
+	cacheReadRetries	 		 = fs.IntP("cache-read-retries", "", DefCacheReadRetries, "How many times to retry a read from a cache storage")
+	cacheDownloadRetries	 = fs.IntP("cache-download-retries", "", DefCacheDownloadRetries, "How many times to retry a download of a chunk from a source fs")
+	cacheTotalWorkers			 = fs.IntP("cache-workers", "", DefCacheTotalWorkers, "How many workers should run in parallel to download chunks")
+	cacheChunkMemory       = fs.BoolP("cache-chunk-memory", "", DefCacheChunkMemory, "Use an in-memory cache for storing chunks during streaming")
 )
 
 // Register with Fs
@@ -46,7 +56,7 @@ func init() {
 			Help: "Remote to cache.\nNormally should contain a ':' and a path, eg \"myremote:path/to/dir\",\n\"myremote:bucket\" or maybe \"myremote:\" (not recommended).",
 		}, {
 			Name: "chunk_size",
-			Help: "The size of a chunk.\nExamples: 1024 (or 1024b), 10M, 1G.\nDefault: 50M",
+			Help: "The size of a chunk.\nDefault: " + DefCacheChunkSize,
 			Examples: []fs.OptionExample{
 				{
 					Value: "1024",
@@ -64,24 +74,60 @@ func init() {
 			},
 			Optional: true,
 		}, {
-			Name: "list_age",
-			Help: "How much time should directory listings be stored in cache.\nAccepted units are: \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".\nDefault: 1m (1 minute)",
+			Name: "chunk_memory",
+			Help: "Use an in-memory cache for storing chunks during streaming.\nDefault: " + strconv.FormatBool(DefCacheChunkMemory),
 			Examples: []fs.OptionExample{
 				{
-					Value: "30s",
-					Help:  "30 seconds",
+					Value: "true",
+					Help:  "Enable",
 				}, {
-					Value: "1m",
-					Help:  "1 minute",
+					Value: "false",
+					Help:  "disable",
+				},
+			},
+			Optional: true,
+		}, {
+			Name: "read_retries",
+			Help: "How many times to retry a read from a cache storage.\nDefault: " + strconv.Itoa(DefCacheReadRetries),
+			Examples: []fs.OptionExample{
+				{
+					Value: "3",
+					Help:  "3 retries",
 				}, {
-					Value: "1h30m",
-					Help:  "1 hour and 30 minutes",
+					Value: "5",
+					Help:  "5 retries",
+				},
+			},
+			Optional: true,
+		}, {
+			Name: "download_retries",
+			Help: "How many times to retry a download of a chunk from a source fs.\nDefault: " + strconv.Itoa(DefCacheDownloadRetries),
+			Examples: []fs.OptionExample{
+				{
+					Value: "3",
+					Help:  "3 retries",
+				}, {
+					Value: "5",
+					Help:  "5 retries",
+				},
+			},
+			Optional: true,
+		}, {
+			Name: "workers",
+			Help: "How many workers should run in parallel to download chunks.\nDefault: " + strconv.Itoa(DefCacheTotalWorkers),
+			Examples: []fs.OptionExample{
+				{
+					Value: "3",
+					Help:  "3 workers",
+				}, {
+					Value: "5",
+					Help:  "5 workers",
 				},
 			},
 			Optional: true,
 		}, {
 			Name: "file_age",
-			Help: "How much time should object info be stored in cache.\nAccepted units are: \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".\nDefault: 1m (1 minute)",
+			Help: "How much time should object info be stored in cache.\nAccepted units are: \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".\nDefault: " + DefCacheFileAge,
 			Examples: []fs.OptionExample{
 				{
 					Value: "30s",
@@ -97,7 +143,7 @@ func init() {
 			Optional: true,
 		}, {
 			Name: "chunk_clean_age",
-			Help: "How old should a chunk be before cleanup.\nAccepted units are: \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".\nDefault: 2h (2 hours)",
+			Help: "How old should a chunk be before cleanup.\nAccepted units are: \"ns\", \"us\" (or \"µs\"), \"ms\", \"s\", \"m\", \"h\".\nDefault: " + DefCacheChunkAge,
 			Examples: []fs.OptionExample{
 				{
 					Value: "30s",
@@ -113,8 +159,6 @@ func init() {
 			Optional: true,
 		}},
 	})
-
-	fs.VarP(&cacheChunkSize, "cache-chunk-size", "", "The size of a chunk. Examples: 1024 (or 1024b), 10M, 1G. Default: 10M")
 }
 
 // ChunkStorage is a storage type that supports only chunk operations (i.e in RAM)
@@ -187,18 +231,21 @@ type Stats struct {
 type Fs struct {
 	fs.Fs
 
-	name          string
-	root          string
-	features      *fs.Features // optional features
-	cache         Storage
-	cacheInfo     *cache.Cache
+	name            string
+	root            string
+	features        *fs.Features // optional features
+	cache           Storage
+	cacheInfo       *cache.Cache
 
-	listAge       time.Duration
-	fileAge       time.Duration
-	chunkSize     int64
-	chunkCleanAge time.Duration
+	fileAge         time.Duration
+	chunkSize       int64
+	chunkAge        time.Duration
+	readRetries     int
+	downloadRetries int
+	totalWorkers    int
+	chunkMemory     bool
 
-	lastCleanup   time.Time
+	lastCleanup     time.Time
 }
 
 // NewFs contstructs an Fs from the path, container:path
@@ -219,48 +266,50 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 
 	var chunkSize fs.SizeSuffix
 	chunkSizeString := fs.ConfigFileGet(name, "chunk_size", DefCacheChunkSize)
-	if cacheChunkSize.String() != "off" {
-		chunkSizeString = cacheChunkSize.String()
+	if *cacheChunkSize != DefCacheChunkSize {
+		chunkSizeString = *cacheChunkSize
 	}
 	err := chunkSize.Set(chunkSizeString)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to understand chunk size", chunkSizeString)
 	}
 
-	listAge := fs.ConfigFileGet(name, "list_age", DefCacheListAge)
-	listDuration, err := time.ParseDuration(listAge)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to understand duration", listAge)
+	readRetries := fs.ConfigFileGetInt(name, "read_retries", DefCacheReadRetries)
+	if *cacheReadRetries != DefCacheReadRetries {
+		readRetries = *cacheReadRetries
 	}
-	if len(*cacheListAge) > 0 {
-		listDuration, err = time.ParseDuration(*cacheListAge)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to understand duration", *cacheListAge)
-		}
+
+	downloadRetries := fs.ConfigFileGetInt(name, "download_retries", DefCacheDownloadRetries)
+	if *cacheDownloadRetries != DefCacheDownloadRetries {
+		downloadRetries = *cacheDownloadRetries
+	}
+
+	totalWorkers := fs.ConfigFileGetInt(name, "workers", DefCacheTotalWorkers)
+	if *cacheTotalWorkers != DefCacheTotalWorkers {
+		totalWorkers = *cacheTotalWorkers
+	}
+
+	chunkMemory := fs.ConfigFileGetBool(name, "chunk_memory", DefCacheChunkMemory)
+	if *cacheChunkMemory != DefCacheChunkMemory {
+		chunkMemory = *cacheChunkMemory
 	}
 
 	fileAge := fs.ConfigFileGet(name, "file_info_age", DefCacheFileAge)
+	if *cacheFileAge != DefCacheFileAge {
+		fileAge = *cacheFileAge
+	}
 	fileDuration, err := time.ParseDuration(fileAge)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to understand duration", fileAge)
 	}
-	if len(*cacheFileAge) > 0 {
-		fileDuration, err = time.ParseDuration(*cacheFileAge)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to understand duration", *cacheFileAge)
-		}
-	}
 
-	chunkCleanAge := fs.ConfigFileGet(name, "chunk_clean_age", DefCacheChunkCleanAge)
+	chunkCleanAge := fs.ConfigFileGet(name, "chunk_clean_age", DefCacheChunkAge)
+	if *cacheChunkAge != DefCacheChunkAge {
+		chunkCleanAge = *cacheChunkAge
+	}
 	chunkCleanDuration, err := time.ParseDuration(chunkCleanAge)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to understand duration", chunkCleanAge)
-	}
-	if len(*cacheChunkCleanAge) > 0 {
-		chunkCleanDuration, err = time.ParseDuration(*cacheChunkCleanAge)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to understand duration", *cacheChunkCleanAge)
-		}
 	}
 
 	// configure cache backend
@@ -272,10 +321,13 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		Fs:            wrappedFs,
 		name:          name,
 		root:          rpath,
-		listAge:       listDuration,
 		fileAge:       fileDuration,
 		chunkSize:     int64(chunkSize),
-		chunkCleanAge: chunkCleanDuration,
+		chunkAge: chunkCleanDuration,
+		readRetries:	 readRetries,
+		downloadRetries: downloadRetries,
+		totalWorkers:	 totalWorkers,
+		chunkMemory:	 chunkMemory,
 		lastCleanup:   time.Now(),
 	}
 
@@ -654,12 +706,12 @@ func (f *Fs) CleanUp() error {
 }
 
 func (f *Fs) cleanUpCache() {
-	if time.Now().Before(f.lastCleanup.Add(f.chunkCleanAge)) {
+	if time.Now().Before(f.lastCleanup.Add(f.chunkAge)) {
 		return
 	}
 
 	fs.Debugf("cache", "starting cache cleanup")
-	f.cache.CleanChunksByAge(f.chunkCleanAge)
+	f.cache.CleanChunksByAge(f.chunkAge)
 
 	//fs.Debugf("cache", "starting stats")
 	//f.cache.Stats()

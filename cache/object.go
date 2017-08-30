@@ -256,24 +256,6 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	return cacheReader, nil
 }
 
-// Read is requested by fuse (most likely) for a specific chunk of the file
-//func (o *Object) ReadBlockAt(reqSize, reqOffset int64) (respData []byte, err error) {
-//	if err := o.RefreshFromSource(); err != nil {
-//		return nil, err
-//	}
-//
-//	o.cacheManager = NewManager(o)
-//
-//	reqEnd := reqOffset + reqSize
-//	if reqEnd > o.Object.Size() {
-//		reqEnd = o.Object.Size()
-//	}
-//
-//	o.cacheManager.Seek(reqOffset, os.SEEK_SET)
-//	go o.cacheManager.StartWorkers()
-//	return o.cacheManager.GetChunk(reqOffset, reqEnd)
-//}
-
 // Update will change the object data
 func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	fs.Debugf(o.Fs(), "update data: %v", o)
