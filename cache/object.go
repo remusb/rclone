@@ -19,7 +19,6 @@ type GetObjectFromSource func() (fs.Object, error)
 // Object is a generic file like object that stores basic information about it
 type Object struct {
 	fs.Object      `json:"-"`
-	fs.BlockReader `json:"-"`
 
 	CacheFs       *Fs    `json:"-"`        // cache fs
 	Name          string `json:"name"`     // name of the directory
