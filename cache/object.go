@@ -13,12 +13,13 @@ import (
 	"github.com/patrickmn/go-cache"
 )
 
+// GetObjectFromSource returns a single Object from source FS as a callback
 type GetObjectFromSource func() (fs.Object, error)
 
 // Object is a generic file like object that stores basic information about it
 type Object struct {
-	fs.Object           `json:"-"`
-	fs.BlockReader 			`json:"-"`
+	fs.Object      `json:"-"`
+	fs.BlockReader `json:"-"`
 
 	CacheFs       *Fs    `json:"-"`        // cache fs
 	Name          string `json:"name"`     // name of the directory
@@ -67,10 +68,10 @@ func ObjectFromOriginal(f *Fs, o fs.Object) *Object {
 
 	dir, name := path.Split(fullRemote)
 	co = &Object{
-		CacheFs:       f,
-		Name:          f.cleanPath(name),
-		Dir:           f.cleanPath(dir),
-		CacheType:     "Object",
+		CacheFs:   f,
+		Name:      f.cleanPath(name),
+		Dir:       f.cleanPath(dir),
+		CacheType: "Object",
 	}
 	co.updateData(o)
 	return co
@@ -90,10 +91,10 @@ func ObjectFromCacheOrSource(f *Fs, remote string, query GetObjectFromSource) (*
 
 	dir, name := path.Split(path.Join(f.Root(), remote))
 	co = &Object{
-		CacheFs:       f,
-		Name:          f.cleanPath(name),
-		Dir:           f.cleanPath(dir),
-		CacheType:     "Object",
+		CacheFs:   f,
+		Name:      f.cleanPath(name),
+		Dir:       f.cleanPath(dir),
+		CacheType: "Object",
 	}
 	err := f.cache.GetObject(co)
 	if err == nil {
@@ -112,13 +113,14 @@ func ObjectFromCacheOrSource(f *Fs, remote string, query GetObjectFromSource) (*
 	return co, nil
 }
 
+// ObjectFromSource returns an object by directly asking the source
 func ObjectFromSource(f *Fs, remote string, query GetObjectFromSource) (*Object, error) {
 	dir, name := path.Split(path.Join(f.Root(), remote))
 	co := &Object{
-		CacheFs:       f,
-		Name:          f.cleanPath(name),
-		Dir:           f.cleanPath(dir),
-		CacheType:     "Object",
+		CacheFs:   f,
+		Name:      f.cleanPath(name),
+		Dir:       f.cleanPath(dir),
+		CacheType: "Object",
 	}
 
 	liveObject, err := query()
@@ -234,25 +236,17 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 		return nil, err
 	}
 
-	fs.Errorf(o, "WARNING: opening object: %#v", options)
-
-	rangeFound := false
 	cacheReader := NewReader(o)
-
 	for _, option := range options {
 		switch x := option.(type) {
-		case *fs.RangeOption:
-			rangeFound = true
 		case *fs.SeekOption:
-			cacheReader.Seek(x.Offset, os.SEEK_SET)
+			_, err := cacheReader.Seek(x.Offset, os.SEEK_SET)
+			if err != nil {
+				return cacheReader, err
+			}
 		}
 	}
 
-	if !rangeFound {
-		//fs.Errorf(o, "WARNING: reading object directly from source: %#v", options)
-	}
-
-	//return o.Object.Open(options...)
 	return cacheReader, nil
 }
 
@@ -357,6 +351,6 @@ func (o *Object) Persist() *Object {
 }
 
 var (
-	_ fs.Object           = (*Object)(nil)
+	_ fs.Object = (*Object)(nil)
 	//_ fs.BlockReader 			= (*Object)(nil)
 )

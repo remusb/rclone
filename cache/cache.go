@@ -8,10 +8,11 @@ import (
 
 	"time"
 
-	"github.com/ncw/rclone/fs"
-	"github.com/pkg/errors"
-	"github.com/patrickmn/go-cache"
 	"strconv"
+
+	"github.com/ncw/rclone/fs"
+	"github.com/patrickmn/go-cache"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -19,7 +20,7 @@ const (
 	DefCacheChunkSize = "5M"
 	// DefCacheFileAge is the default value for object info age
 	DefCacheFileAge = "5m"
-	// DefCacheChunkCleanAge is the default value for chunk age duration
+	// DefCacheChunkAge is the default value for chunk age duration
 	DefCacheChunkAge = "2m"
 	// DefCacheReadRetries is the default value for read retries
 	DefCacheReadRetries = 5
@@ -34,15 +35,15 @@ const (
 // Globals
 var (
 	// Flags
-	cacheDbPath        		 = fs.StringP("cache-db-path", "", path.Dir(fs.ConfigPath), "Directory to cache DB")
-	cacheDbPurge       		 = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
-	cacheChunkSize     		 = fs.StringP("cache-chunk-size", "", DefCacheChunkSize, "The size of a chunk")
-	cacheFileAge       		 = fs.StringP("cache-file-info-age", "", DefCacheFileAge, "How much time should object info be stored in cache")
-	cacheChunkAge 				 = fs.StringP("cache-chunk-age", "", DefCacheChunkAge, "How much time should a chunk be in cache before cleanup")
-	cacheReadRetries	 		 = fs.IntP("cache-read-retries", "", DefCacheReadRetries, "How many times to retry a read from a cache storage")
-	cacheDownloadRetries	 = fs.IntP("cache-download-retries", "", DefCacheDownloadRetries, "How many times to retry a download of a chunk from a source fs")
-	cacheTotalWorkers			 = fs.IntP("cache-workers", "", DefCacheTotalWorkers, "How many workers should run in parallel to download chunks")
-	cacheChunkMemory       = fs.BoolP("cache-chunk-memory", "", DefCacheChunkMemory, "Use an in-memory cache for storing chunks during streaming")
+	cacheDbPath          = fs.StringP("cache-db-path", "", path.Dir(fs.ConfigPath), "Directory to cache DB")
+	cacheDbPurge         = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
+	cacheChunkSize       = fs.StringP("cache-chunk-size", "", DefCacheChunkSize, "The size of a chunk")
+	cacheFileAge         = fs.StringP("cache-file-info-age", "", DefCacheFileAge, "How much time should object info be stored in cache")
+	cacheChunkAge        = fs.StringP("cache-chunk-age", "", DefCacheChunkAge, "How much time should a chunk be in cache before cleanup")
+	cacheReadRetries     = fs.IntP("cache-read-retries", "", DefCacheReadRetries, "How many times to retry a read from a cache storage")
+	cacheDownloadRetries = fs.IntP("cache-download-retries", "", DefCacheDownloadRetries, "How many times to retry a download of a chunk from a source fs")
+	cacheTotalWorkers    = fs.IntP("cache-workers", "", DefCacheTotalWorkers, "How many workers should run in parallel to download chunks")
+	cacheChunkMemory     = fs.BoolP("cache-chunk-memory", "", DefCacheChunkMemory, "Use an in-memory cache for storing chunks during streaming")
 )
 
 // Register with Fs
@@ -231,11 +232,11 @@ type Stats struct {
 type Fs struct {
 	fs.Fs
 
-	name            string
-	root            string
-	features        *fs.Features // optional features
-	cache           Storage
-	cacheInfo       *cache.Cache
+	name      string
+	root      string
+	features  *fs.Features // optional features
+	cache     Storage
+	cacheInfo *cache.Cache
 
 	fileAge         time.Duration
 	chunkSize       int64
@@ -245,7 +246,7 @@ type Fs struct {
 	totalWorkers    int
 	chunkMemory     bool
 
-	lastCleanup     time.Time
+	lastCleanup time.Time
 }
 
 // NewFs contstructs an Fs from the path, container:path
@@ -318,17 +319,17 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	}
 
 	f := &Fs{
-		Fs:            wrappedFs,
-		name:          name,
-		root:          rpath,
-		fileAge:       fileDuration,
-		chunkSize:     int64(chunkSize),
-		chunkAge: chunkCleanDuration,
-		readRetries:	 readRetries,
+		Fs:              wrappedFs,
+		name:            name,
+		root:            rpath,
+		fileAge:         fileDuration,
+		chunkSize:       int64(chunkSize),
+		chunkAge:        chunkCleanDuration,
+		readRetries:     readRetries,
 		downloadRetries: downloadRetries,
-		totalWorkers:	 totalWorkers,
-		chunkMemory:	 chunkMemory,
-		lastCleanup:   time.Now(),
+		totalWorkers:    totalWorkers,
+		chunkMemory:     chunkMemory,
+		lastCleanup:     time.Now(),
 	}
 
 	f.cacheInfo = cache.New(fileDuration, time.Minute)
@@ -396,7 +397,7 @@ func (f *Fs) Cache() Storage {
 	return f.cache
 }
 
-// Cache is the persistent type cache
+// CacheInfo is the persistent type cache
 func (f *Fs) CacheInfo() *cache.Cache {
 	return f.cacheInfo
 }

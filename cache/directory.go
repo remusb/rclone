@@ -11,6 +11,7 @@ import (
 	"github.com/patrickmn/go-cache"
 )
 
+// GetEntriesFromSource returns a list of entries from a source FS as a callback
 type GetEntriesFromSource func() (fs.DirEntries, error)
 
 // Directory is a generic dir that stores basic information about it
@@ -23,8 +24,8 @@ type Directory struct {
 	CacheModTime int64  `json:"modTime"` // modification or creation time - IsZero for unknown
 	CacheSize    int64  `json:"size"`    // size of directory and contents or -1 if unknown
 
-	CacheItems int64     `json:"items"`     // number of objects or -1 for unknown
-	CacheType  string    `json:"cacheType"` // object type
+	CacheItems int64  `json:"items"`     // number of objects or -1 for unknown
+	CacheType  string `json:"cacheType"` // object type
 }
 
 // NewDirectory builds an empty dir which will be used to unmarshal data in it
@@ -191,7 +192,7 @@ func (d *Directory) GetEntries(query GetEntriesFromSource) (fs.DirEntries, error
 	return cachedEntries, nil
 }
 
-// Remove deletes the dir from all caches
+// Flush deletes the dir from all caches
 func (d *Directory) Flush() {
 	d.CacheFs.CacheInfo().Delete(d.Abs())
 	err := d.CacheFs.Cache().RemoveDir(d)

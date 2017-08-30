@@ -162,20 +162,6 @@ type Info interface {
 	Features() *Features
 }
 
-// BlockReader reads object blocks with specific limits
-type BlockReader interface {
-	Object
-
-	ReadBlockAt(reqSize, reqOffset int64) (respData []byte, err error)
-}
-
-// BlockReader reads object blocks with specific limits
-type BlockWriter interface {
-	Object
-
-	WriteBlockAt(reqSize, reqOffset int64) (respData []byte, err error)
-}
-
 // Object is a filesystem like object provided by an Fs
 type Object interface {
 	ObjectInfo

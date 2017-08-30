@@ -6,38 +6,40 @@ import (
 	"sync"
 	"time"
 
+	"fmt"
+	"os"
+
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
-	"os"
-	"fmt"
 )
 
-// Manager is managing the chunk retrieval from both source and cache for a single object
+// Reader is managing the read operations on an open handle
 type Reader struct {
-	CachedObject    *Object
-	memory        	ChunkStorage
-	preloadQueue		chan int64
-	preloadOffset		int64
-	offset					int64
-	mu							sync.RWMutex
+	CachedObject  *Object
+	memory        ChunkStorage
+	preloadQueue  chan int64
+	preloadOffset int64
+	offset        int64
+	mu            sync.RWMutex
 
 	ReadRetries     int
 	DownloadRetries int
 	TotalWorkers    int
-	UseMemory				bool
-	workers					[]*worker
+	UseMemory       bool
+	workers         []*worker
 }
 
+// NewReader returns a new Reader
 func NewReader(o *Object) *Reader {
-	r := &Reader {
-		CachedObject: o,
-		offset: 0,
+	r := &Reader{
+		CachedObject:  o,
+		offset:        0,
 		preloadOffset: -1, // -1 to trigger the first preload
 
 		ReadRetries:     o.CacheFs.readRetries,
 		DownloadRetries: o.CacheFs.downloadRetries,
 		TotalWorkers:    o.CacheFs.totalWorkers,
-		UseMemory:			 o.CacheFs.chunkMemory,
+		UseMemory:       o.CacheFs.chunkMemory,
 	}
 
 	if r.UseMemory {
@@ -48,9 +50,9 @@ func NewReader(o *Object) *Reader {
 	r.preloadQueue = make(chan int64, r.TotalWorkers*10)
 	for i := 0; i < r.TotalWorkers; i++ {
 		w := &worker{
-			r: 	r,
+			r:  r,
 			ch: r.preloadQueue,
-			id: i+1,
+			id: i + 1,
 		}
 		go w.run()
 
@@ -209,10 +211,10 @@ func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 		fs.Debugf(r, "moving offset set from %v to %v", r.offset, offset)
 		r.offset = offset
 	case os.SEEK_CUR:
-		fs.Debugf(r, "moving offset cur from %v to %v", r.offset, r.offset + offset)
+		fs.Debugf(r, "moving offset cur from %v to %v", r.offset, r.offset+offset)
 		r.offset += offset
 	case os.SEEK_END:
-		fs.Debugf(r, "moving offset end (%v) from %v to %v", r.CachedObject.Size(), r.offset, r.CachedObject.Size() + offset)
+		fs.Debugf(r, "moving offset end (%v) from %v to %v", r.CachedObject.Size(), r.offset, r.CachedObject.Size()+offset)
 		r.offset = r.CachedObject.Size() + offset
 	default:
 		err = errors.Errorf("cache: unimplemented seek whence %v", whence)
@@ -312,7 +314,7 @@ func (w *worker) run() {
 			}
 		}
 
-		chunkEnd := chunkStart+w.r.CacheFs().chunkSize
+		chunkEnd := chunkStart + w.r.CacheFs().chunkSize
 		if chunkEnd > chunkStart+w.r.CachedObject.Size() {
 			chunkEnd = w.r.CachedObject.Size()
 		}
@@ -332,11 +334,11 @@ func (w *worker) run() {
 			continue
 		}
 
-		data = make([]byte, chunkEnd - chunkStart)
+		data = make([]byte, chunkEnd-chunkStart)
 
 		sourceRead := 0
 		sourceRead, err = io.ReadFull(w.rc, data)
-		if err != nil && err != io.EOF  {
+		if err != nil && err != io.EOF {
 			fs.Errorf(w, "failed to read chunk %v: %v", chunkStart, err)
 		}
 		data = data[:sourceRead] // reslice to remove extra garbage
@@ -357,6 +359,6 @@ func (w *worker) run() {
 
 // Check the interfaces are satisfied
 var (
-	_ io.ReadCloser             = (*Reader)(nil)
-	_ io.Seeker             		= (*Reader)(nil)
+	_ io.ReadCloser = (*Reader)(nil)
+	_ io.Seeker     = (*Reader)(nil)
 )
