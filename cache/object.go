@@ -1,3 +1,5 @@
+// +build !plan9
+
 package cache
 
 import (
@@ -74,14 +76,12 @@ func (o *Object) Fs() fs.Info {
 	return o.CacheFs
 }
 
-// GetCacheFs returns the CacheFS type
-func (o *Object) GetCacheFs() *Fs {
-	return o.CacheFs
-}
-
 // String returns a human friendly name for this object
 func (o *Object) String() string {
-	return path.Join(o.Dir, o.Name)
+	if o == nil {
+		return "<nil>"
+	}
+	return o.Remote()
 }
 
 // Remote returns the remote path
@@ -95,9 +95,15 @@ func (o *Object) Remote() string {
 	return p
 }
 
-// Abs returns the absolute path to the object
-func (o *Object) Abs() string {
+// abs returns the absolute path to the object
+func (o *Object) abs() string {
 	return path.Join(o.Dir, o.Name)
+}
+
+// parentRemote returns the absolute path parent remote
+func (o *Object) parentRemote() string {
+	absPath := o.abs()
+	return cleanPath(path.Dir(absPath))
 }
 
 // ModTime returns the cached ModTime
@@ -115,8 +121,8 @@ func (o *Object) Storable() bool {
 	return o.CacheStorable
 }
 
-// RefreshFromSource requests the original FS for the object in case it comes from a cached entry
-func (o *Object) RefreshFromSource() error {
+// refreshFromSource requests the original FS for the object in case it comes from a cached entry
+func (o *Object) refreshFromSource() error {
 	o.refreshMutex.Lock()
 	defer o.refreshMutex.Unlock()
 
@@ -130,14 +136,14 @@ func (o *Object) RefreshFromSource() error {
 		return err
 	}
 	o.updateData(liveObject)
-	o.Persist()
+	o.persist()
 
 	return nil
 }
 
 // SetModTime sets the ModTime of this object
 func (o *Object) SetModTime(t time.Time) error {
-	if err := o.RefreshFromSource(); err != nil {
+	if err := o.refreshFromSource(); err != nil {
 		return err
 	}
 
@@ -147,7 +153,7 @@ func (o *Object) SetModTime(t time.Time) error {
 	}
 
 	o.CacheModTime = t.UnixNano()
-	o.Persist()
+	o.persist()
 	fs.Debugf(o.Fs(), "updated ModTime %v: %v", o, t)
 
 	return nil
@@ -155,7 +161,7 @@ func (o *Object) SetModTime(t time.Time) error {
 
 // Open is used to request a specific part of the file using fs.RangeOption
 func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
-	if err := o.RefreshFromSource(); err != nil {
+	if err := o.refreshFromSource(); err != nil {
 		return nil, err
 	}
 	o.CacheFs.CheckIfWarmupNeeded(o.Remote())
@@ -176,10 +182,13 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 
 // Update will change the object data
 func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
-	if err := o.RefreshFromSource(); err != nil {
+	if err := o.refreshFromSource(); err != nil {
 		return err
 	}
-	fs.Infof(o, "updating object contents with size %q", src.Size())
+	fs.Infof(o, "updating object contents with size %v", src.Size())
+
+	// deleting cached chunks and info to be replaced with new ones
+	_ = o.CacheFs.cache.RemoveObject(o.abs())
 
 	err := o.Object.Update(in, src, options...)
 	if err != nil {
@@ -190,14 +199,14 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 	o.CacheModTime = src.ModTime().UnixNano()
 	o.CacheSize = src.Size()
 	o.CacheHashes = make(map[fs.HashType]string)
-	o.Persist()
+	o.persist()
 
 	return nil
 }
 
 // Remove deletes the object from both the cache and the source
 func (o *Object) Remove() error {
-	if err := o.RefreshFromSource(); err != nil {
+	if err := o.refreshFromSource(); err != nil {
 		return err
 	}
 	err := o.Object.Remove()
@@ -206,7 +215,7 @@ func (o *Object) Remove() error {
 	}
 	fs.Infof(o, "removing object")
 
-	_ = o.CacheFs.Cache().RemoveObject(o.Abs())
+	_ = o.CacheFs.cache.RemoveObject(o.abs())
 	return err
 }
 
@@ -222,7 +231,7 @@ func (o *Object) Hash(ht fs.HashType) (string, error) {
 		return cachedHash, nil
 	}
 
-	if err := o.RefreshFromSource(); err != nil {
+	if err := o.refreshFromSource(); err != nil {
 		return "", err
 	}
 
@@ -233,15 +242,15 @@ func (o *Object) Hash(ht fs.HashType) (string, error) {
 
 	o.CacheHashes[ht] = liveHash
 
-	o.Persist()
+	o.persist()
 	fs.Debugf(o, "object hash cached: %v", liveHash)
 
 	return liveHash, nil
 }
 
-// Persist adds this object to the persistent cache
-func (o *Object) Persist() *Object {
-	err := o.CacheFs.Cache().AddObject(o)
+// persist adds this object to the persistent cache
+func (o *Object) persist() *Object {
+	err := o.CacheFs.cache.AddObject(o)
 	if err != nil {
 		fs.Errorf(o, "failed to cache object: %v", err)
 	}

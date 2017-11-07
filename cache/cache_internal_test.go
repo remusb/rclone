@@ -1,4 +1,4 @@
-// +build !windows
+// +build !plan9
 
 package cache_test
 
@@ -30,6 +30,7 @@ var (
 	metaAge    = time.Second * 30
 	infoAge    = time.Second * 10
 	chunkAge   = time.Second * 10
+	okDiff     = time.Second * 3
 	workers    = 2
 	warmupRate = 3
 	warmupSec  = 10
@@ -40,7 +41,7 @@ func TestInternalInit(t *testing.T) {
 	var err error
 
 	// delete the default path
-	dbPath := path.Join(path.Dir(fs.ConfigPath), *RemoteName+".db")
+	dbPath := path.Join(path.Dir(fs.ConfigPath), "cache", *RemoteName+".db")
 	boltDb = cache.GetPersistent(dbPath, true)
 	fstest.Initialise()
 
@@ -72,6 +73,7 @@ func TestInternalInit(t *testing.T) {
 
 	// Instantiate root
 	rootFs, err = fs.NewFs(*RemoteName + ":")
+	_ = rootFs.Features().Purge()
 	require.NoError(t, err)
 	err = rootFs.Mkdir("")
 	require.NoError(t, err)
@@ -174,6 +176,26 @@ func TestInternalCachedWrittenContentMatches(t *testing.T) {
 	require.Equal(t, checkSample, testSample)
 }
 
+func TestInternalCachedUpdatedContentMatches(t *testing.T) {
+	reset(t)
+
+	// create some rand test data
+	testData1 := []byte(fstest.RandomString(100))
+	testData2 := []byte(fstest.RandomString(200))
+
+	// write the object
+	o := updateObjectBytes(t, rootFs, "data.bin", testData1, testData2)
+	require.Equal(t, o.Size(), int64(len(testData2)))
+
+	// check data from in-file
+	reader, err := o.Open()
+	require.NoError(t, err)
+	checkSample, err := ioutil.ReadAll(reader)
+	_ = reader.Close()
+	require.NoError(t, err)
+	require.Equal(t, checkSample, testData2)
+}
+
 func TestInternalWrappedWrittenContentMatches(t *testing.T) {
 	cfs, err := getCacheFs(rootFs)
 	require.NoError(t, err)
@@ -265,7 +287,7 @@ func TestInternalWarmUp(t *testing.T) {
 	expectedExpiry := time.Now().Add(chunkAge)
 	ts, err := boltDb.GetChunkTs(path.Join(rootFs.Root(), o2.Remote()), 0)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, time.Second)
+	require.WithinDuration(t, expectedExpiry, ts, okDiff)
 
 	// validate that we entered a warm up state
 	_ = readDataFromObj(t, o3, 0, chunkSize, false)
@@ -273,11 +295,11 @@ func TestInternalWarmUp(t *testing.T) {
 	expectedExpiry = time.Now().Add(metaAge)
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o3.Remote()), 0)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, time.Second)
+	require.WithinDuration(t, expectedExpiry, ts, okDiff)
 
 	// validate that we cooled down and exit warm up
 	// we wait for the cache to expire
-	fmt.Printf("Waiting 10 seconds for warm up to expire\n")
+	t.Logf("Waiting 10 seconds for warm up to expire\n")
 	time.Sleep(time.Second * 10)
 
 	_ = readDataFromObj(t, o3, chunkSize, chunkSize*2, false)
@@ -285,7 +307,7 @@ func TestInternalWarmUp(t *testing.T) {
 	expectedExpiry = time.Now().Add(chunkAge)
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o3.Remote()), chunkSize)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, time.Second)
+	require.WithinDuration(t, expectedExpiry, ts, okDiff)
 }
 
 func TestInternalWarmUpInFlight(t *testing.T) {
@@ -308,7 +330,7 @@ func TestInternalWarmUpInFlight(t *testing.T) {
 	expectedExpiry := time.Now().Add(metaAge)
 	ts, err := boltDb.GetChunkTs(path.Join(rootFs.Root(), o3.Remote()), 0)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, time.Second)
+	require.WithinDuration(t, expectedExpiry, ts, okDiff)
 
 	checkSample := make([]byte, chunkSize)
 	reader, err := o3.Open(&fs.SeekOption{Offset: 0})
@@ -332,11 +354,11 @@ func TestInternalWarmUpInFlight(t *testing.T) {
 	expectedExpiry = time.Now().Add(chunkAge)
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o3.Remote()), chunkSize*int64(workers+1))
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, time.Second*2)
+	require.WithinDuration(t, expectedExpiry, ts, okDiff)
 
 	// validate that we cooled down and exit warm up
 	// we wait for the cache to expire
-	fmt.Printf("Waiting 10 seconds for warm up to expire\n")
+	t.Logf("Waiting 10 seconds for warm up to expire\n")
 	time.Sleep(time.Second * 10)
 
 	_ = readDataFromObj(t, o2, chunkSize, chunkSize*2, false)
@@ -344,7 +366,7 @@ func TestInternalWarmUpInFlight(t *testing.T) {
 	expectedExpiry = time.Now().Add(chunkAge)
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o2.Remote()), chunkSize)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, time.Second)
+	require.WithinDuration(t, expectedExpiry, ts, okDiff)
 }
 
 // TODO: this is bugged
@@ -391,7 +413,7 @@ func TestInternalCacheWrites(t *testing.T) {
 	expectedExpiry := time.Now().Add(metaAge)
 	ts, err := boltDb.GetChunkTs(path.Join(rootFs.Root(), co.Remote()), 0)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, time.Second)
+	require.WithinDuration(t, expectedExpiry, ts, okDiff)
 
 	// reset fs
 	_ = flag.Set("cache-writes", "false")
@@ -413,7 +435,7 @@ func TestInternalExpiredChunkRemoved(t *testing.T) {
 	_ = readDataFromObj(t, co, 0, co.Size(), false)
 
 	// we wait for the cache to expire
-	fmt.Printf("Waiting %v for cache to expire\n", chunkAge.String())
+	t.Logf("Waiting %v for cache to expire\n", chunkAge.String())
 	time.Sleep(chunkAge)
 	_, _ = cfs.List("")
 	time.Sleep(time.Second * 2)
@@ -441,7 +463,7 @@ func TestInternalExpiredEntriesRemoved(t *testing.T) {
 	require.Equal(t, int64(len([]byte("one content"))), objOne.Size())
 
 	waitTime := infoAge + time.Second*2
-	fmt.Printf("Waiting %v seconds for cache to expire\n", waitTime)
+	t.Logf("Waiting %v seconds for cache to expire\n", waitTime)
 	time.Sleep(infoAge)
 
 	_, err = cfs.List("test")
@@ -483,6 +505,21 @@ func writeObjectBytes(t *testing.T, f fs.Fs, remote string, data []byte) fs.Obje
 
 	obj, err := f.Put(in, objInfo)
 	require.NoError(t, err)
+
+	return obj
+}
+
+func updateObjectBytes(t *testing.T, f fs.Fs, remote string, data1 []byte, data2 []byte) fs.Object {
+	in1 := bytes.NewReader(data1)
+	in2 := bytes.NewReader(data2)
+	objInfo1 := fs.NewStaticObjectInfo(remote, time.Now(), int64(len(data1)), true, nil, f)
+	objInfo2 := fs.NewStaticObjectInfo(remote, time.Now(), int64(len(data2)), true, nil, f)
+
+	obj, err := f.Put(in1, objInfo1)
+	require.NoError(t, err)
+	obj, err = f.NewObject(remote)
+	require.NoError(t, err)
+	err = obj.Update(in2, objInfo2)
 
 	return obj
 }

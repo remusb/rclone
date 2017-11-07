@@ -1,3 +1,5 @@
+// +build !plan9
+
 package cache
 
 import (
@@ -37,14 +39,14 @@ func (m *Memory) Connect(defaultExpiration time.Duration) error {
 
 // HasChunk confirms the existence of a single chunk of an object
 func (m *Memory) HasChunk(cachedObject *Object, offset int64) bool {
-	key := cachedObject.Abs() + "-" + strconv.FormatInt(offset, 10)
+	key := cachedObject.abs() + "-" + strconv.FormatInt(offset, 10)
 	_, found := m.db.Get(key)
 	return found
 }
 
 // GetChunk will retrieve a single chunk which belongs to a cached object or an error if it doesn't find it
 func (m *Memory) GetChunk(cachedObject *Object, offset int64) ([]byte, error) {
-	key := cachedObject.Abs() + "-" + strconv.FormatInt(offset, 10)
+	key := cachedObject.abs() + "-" + strconv.FormatInt(offset, 10)
 	var data []byte
 
 	if x, found := m.db.Get(key); found {
@@ -57,7 +59,7 @@ func (m *Memory) GetChunk(cachedObject *Object, offset int64) ([]byte, error) {
 
 // AddChunk adds a new chunk of a cached object
 func (m *Memory) AddChunk(cachedObject *Object, data []byte, offset int64) error {
-	return m.AddChunkAhead(cachedObject.Abs(), data, offset, time.Second)
+	return m.AddChunkAhead(cachedObject.abs(), data, offset, time.Second)
 }
 
 // AddChunkAhead adds a new chunk of a cached object

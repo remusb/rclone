@@ -3,4 +3,4 @@
 
 // +build plan9
 
-package cache
+package cachestats

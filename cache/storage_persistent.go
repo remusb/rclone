@@ -1,3 +1,5 @@
+// +build !plan9
+
 package cache
 
 import (
@@ -211,7 +213,7 @@ func (b *Persistent) updateRootTs(tx *bolt.Tx, path string, t time.Duration) {
 // AddDir will update a CachedDirectory metadata and all its entries
 func (b *Persistent) AddDir(cachedDir *Directory) error {
 	return b.db.Update(func(tx *bolt.Tx) error {
-		bucket := b.getBucket(cachedDir.Abs(), true, tx)
+		bucket := b.getBucket(cachedDir.abs(), true, tx)
 		if bucket == nil {
 			return errors.Errorf("couldn't open bucket (%v)", cachedDir)
 		}
@@ -225,7 +227,7 @@ func (b *Persistent) AddDir(cachedDir *Directory) error {
 			return err
 		}
 
-		b.updateRootTs(tx, cachedDir.Abs(), cachedDir.CacheFs.fileAge)
+		b.updateRootTs(tx, cachedDir.abs(), cachedDir.CacheFs.fileAge)
 		return nil
 	})
 }
@@ -235,16 +237,16 @@ func (b *Persistent) GetDirEntries(cachedDir *Directory) (fs.DirEntries, error) 
 	var dirEntries fs.DirEntries
 
 	err := b.db.View(func(tx *bolt.Tx) error {
-		bucket := b.getBucket(cachedDir.Abs(), false, tx)
+		bucket := b.getBucket(cachedDir.abs(), false, tx)
 		if bucket == nil {
-			return errors.Errorf("couldn't open bucket (%v)", cachedDir.Abs())
+			return errors.Errorf("couldn't open bucket (%v)", cachedDir.abs())
 		}
 
 		val := bucket.Get([]byte("."))
 		if val != nil {
 			err := json.Unmarshal(val, cachedDir)
 			if err != nil {
-				fs.Debugf(cachedDir.Abs(), "error during unmarshalling obj: %v", err)
+				fs.Debugf(cachedDir.abs(), "error during unmarshalling obj: %v", err)
 			}
 		} else {
 			return errors.Errorf("missing cached dir: %v", cachedDir)
@@ -295,6 +297,20 @@ func (b *Persistent) GetDirEntries(cachedDir *Directory) (fs.DirEntries, error) 
 
 // RemoveDir will delete a CachedDirectory, all its objects and all the chunks stored for it
 func (b *Persistent) RemoveDir(fp string) error {
+	err := b.ExpireDir(fp)
+
+	// delete chunks on disk
+	// safe to ignore as the files might not have been open
+	if err != nil {
+		_ = os.RemoveAll(path.Join(b.dataPath, fp))
+	}
+
+	return nil
+}
+
+// ExpireDir will flush a CachedDirectory and all its objects from the objects
+// chunks will remain as they are
+func (b *Persistent) ExpireDir(fp string) error {
 	parentDir, dirName := path.Split(fp)
 	if fp == "" {
 		return b.db.Update(func(tx *bolt.Tx) error {
@@ -324,9 +340,6 @@ func (b *Persistent) RemoveDir(fp string) error {
 		if err != nil {
 			fs.Debugf(fp, "couldn't delete from cache: %v", err)
 		}
-		// delete chunks on disk
-		// safe to ignore as the files might not have been open
-		_ = os.RemoveAll(path.Join(b.dataPath, fp))
 		return nil
 	})
 }
@@ -362,7 +375,7 @@ func (b *Persistent) AddObject(cachedObject *Object) error {
 		if err != nil {
 			return errors.Errorf("couldn't cache object (%v) info: %v", cachedObject, err)
 		}
-		b.updateRootTs(tx, cachedObject.Abs(), cachedObject.CacheFs.fileAge)
+		b.updateRootTs(tx, cachedObject.abs(), cachedObject.CacheFs.fileAge)
 		return nil
 	})
 }
@@ -414,7 +427,7 @@ func (b *Persistent) HasEntry(remote string) bool {
 
 // HasChunk confirms the existence of a single chunk of an object
 func (b *Persistent) HasChunk(cachedObject *Object, offset int64) bool {
-	fp := path.Join(b.dataPath, cachedObject.Abs(), strconv.FormatInt(offset, 10))
+	fp := path.Join(b.dataPath, cachedObject.abs(), strconv.FormatInt(offset, 10))
 	if _, err := os.Stat(fp); !os.IsNotExist(err) {
 		return true
 	}
@@ -423,10 +436,10 @@ func (b *Persistent) HasChunk(cachedObject *Object, offset int64) bool {
 
 // GetChunk will retrieve a single chunk which belongs to a cached object or an error if it doesn't find it
 func (b *Persistent) GetChunk(cachedObject *Object, offset int64) ([]byte, error) {
-	p := cachedObject.Abs()
+	p := cachedObject.abs()
 	var data []byte
 
-	fp := path.Join(b.dataPath, cachedObject.Abs(), strconv.FormatInt(offset, 10))
+	fp := path.Join(b.dataPath, cachedObject.abs(), strconv.FormatInt(offset, 10))
 	data, err := ioutil.ReadFile(fp)
 	if err != nil {
 		return nil, err
@@ -451,7 +464,7 @@ func (b *Persistent) AddChunk(cachedObject *Object, data []byte, offset int64) e
 	if cachedObject.CacheFs.InWarmUp() {
 		t = cachedObject.CacheFs.metaAge
 	}
-	return b.AddChunkAhead(cachedObject.Abs(), data, offset, t)
+	return b.AddChunkAhead(cachedObject.abs(), data, offset, t)
 }
 
 // AddChunkAhead adds a new chunk before caching an Object for it

@@ -1,3 +1,5 @@
+// +build !plan9
+
 package cache
 
 import (
@@ -27,6 +29,7 @@ type Handle struct {
 	workers      []*worker
 	chunkAge     time.Duration
 	warmup       bool
+	closed       bool
 }
 
 // NewObjectHandle returns a new Handle for an existing Object
@@ -54,24 +57,19 @@ func NewObjectHandle(o *Object) *Handle {
 	return r
 }
 
-// CacheFs is a convenience method to get the parent cache FS of the object's manager
-func (r *Handle) CacheFs() *Fs {
+// cacheFs is a convenience method to get the parent cache FS of the object's manager
+func (r *Handle) cacheFs() *Fs {
 	return r.cachedObject.CacheFs
 }
 
-// Storage is a convenience method to get the persistent storage of the object's manager
-func (r *Handle) Storage() Storage {
-	return r.CacheFs().Cache()
-}
-
-// Memory is a convenience method to get the transient storage of the object's manager
-func (r *Handle) Memory() ChunkStorage {
-	return r.memory
+// storage is a convenience method to get the persistent storage of the object's manager
+func (r *Handle) storage() Storage {
+	return r.cacheFs().cache
 }
 
 // String representation of this reader
 func (r *Handle) String() string {
-	return r.cachedObject.Abs()
+	return r.cachedObject.abs()
 }
 
 // InWarmUp says if this handle is in warmup mode
@@ -101,7 +99,7 @@ func (r *Handle) queueOffset(offset int64) {
 	if offset != r.preloadOffset {
 		r.preloadOffset = offset
 		previousChunksCounter := 0
-		maxOffset := r.CacheFs().chunkSize * int64(r.CacheFs().OriginalSettingWorkers())
+		maxOffset := r.cacheFs().chunkSize * int64(r.cacheFs().originalSettingWorkers())
 
 		// clear the past seen chunks
 		// they will remain in our persistent storage but will be removed from transient
@@ -119,16 +117,16 @@ func (r *Handle) queueOffset(offset int64) {
 
 		// if we read all the previous chunks that could have been preloaded
 		// we should then disable warm up setting for this handle
-		if r.warmup && previousChunksCounter >= r.CacheFs().OriginalSettingWorkers() {
-			r.TotalWorkers = r.CacheFs().OriginalSettingWorkers()
-			r.UseMemory = !r.CacheFs().OriginalSettingChunkNoMemory()
-			r.chunkAge = r.CacheFs().chunkAge
+		if r.warmup && previousChunksCounter >= r.cacheFs().originalSettingWorkers() {
+			r.TotalWorkers = r.cacheFs().originalSettingWorkers()
+			r.UseMemory = !r.cacheFs().originalSettingChunkNoMemory()
+			r.chunkAge = r.cacheFs().chunkAge
 			r.warmup = false
 			fs.Infof(r, "disabling warm up")
 		}
 
 		for i := 0; i < r.TotalWorkers; i++ {
-			o := r.preloadOffset + r.CacheFs().chunkSize*int64(i)
+			o := r.preloadOffset + r.cacheFs().chunkSize*int64(i)
 			if o < 0 || o >= r.cachedObject.Size() {
 				continue
 			}
@@ -152,7 +150,7 @@ func (r *Handle) hasAtLeastOneWorker() bool {
 	return oneWorker
 }
 
-// GetChunk is called by the FS to retrieve a specific chunk of known start and size from where it can find it
+// getChunk is called by the FS to retrieve a specific chunk of known start and size from where it can find it
 // it can be from transient or persistent cache
 // it will also build the chunk from the cache's specific chunk boundaries and build the final desired chunk in a buffer
 func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
@@ -166,7 +164,7 @@ func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
 	}
 
 	// we calculate the modulus of the requested offset with the size of a chunk
-	offset := chunkStart % r.CacheFs().chunkSize
+	offset := chunkStart % r.cacheFs().chunkSize
 
 	// we align the start offset of the first chunk to a likely chunk in the storage
 	chunkStart = chunkStart - offset
@@ -175,9 +173,9 @@ func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
 
 	// delete old chunks from memory
 	if r.UseMemory {
-		go r.Memory().CleanChunksByNeed(chunkStart)
+		go r.memory.CleanChunksByNeed(chunkStart)
 
-		data, err = r.Memory().GetChunk(r.cachedObject, chunkStart)
+		data, err = r.memory.GetChunk(r.cachedObject, chunkStart)
 		if err == nil {
 			found = true
 		}
@@ -187,7 +185,7 @@ func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
 		// we're gonna give the workers a chance to pickup the chunk
 		// and retry a couple of times
 		for i := 0; i < r.ReadRetries; i++ {
-			data, err = r.Storage().GetChunk(r.cachedObject, chunkStart)
+			data, err = r.storage().GetChunk(r.cachedObject, chunkStart)
 
 			if err == nil {
 				found = true
@@ -232,7 +230,6 @@ func (r *Handle) Read(p []byte) (n int, err error) {
 	}
 	readSize := copy(p, buf)
 	newOffset := currentOffset + int64(readSize)
-
 	r.offset = newOffset
 	if r.offset >= r.cachedObject.Size() {
 		return readSize, io.EOF
@@ -245,9 +242,21 @@ func (r *Handle) Read(p []byte) (n int, err error) {
 func (r *Handle) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return os.ErrClosed
+	}
 
 	close(r.preloadQueue)
-	go r.CacheFs().CleanUpCache(false)
+	r.closed = true
+	// wait for workers to complete their jobs before returning
+	waitCount := 3
+	for i := 0; i < len(r.workers); i++ {
+		waitIdx := 0
+		for r.workers[i].isRunning() && waitIdx < waitCount {
+			time.Sleep(time.Second)
+			waitIdx++
+		}
+	}
 
 	fs.Debugf(r, "cache reader closed %v", r.offset)
 	return nil
@@ -273,9 +282,9 @@ func (r *Handle) Seek(offset int64, whence int) (int64, error) {
 		err = errors.Errorf("cache: unimplemented seek whence %v", whence)
 	}
 
-	chunkStart := r.offset - (r.offset % r.CacheFs().chunkSize)
-	if chunkStart >= r.CacheFs().chunkSize {
-		chunkStart = chunkStart - r.CacheFs().chunkSize
+	chunkStart := r.offset - (r.offset % r.cacheFs().chunkSize)
+	if chunkStart >= r.cacheFs().chunkSize {
+		chunkStart = chunkStart - r.cacheFs().chunkSize
 	}
 	r.queueOffset(chunkStart)
 
@@ -304,8 +313,8 @@ func (w *worker) reader(offset, end int64) (io.ReadCloser, error) {
 	var err error
 	r := w.rc
 	if w.rc == nil {
-		r, err = w.r.CacheFs().OpenRateLimited(func() (io.ReadCloser, error) {
-			return w.r.cachedObject.Object.Open(&fs.SeekOption{Offset: offset}, &fs.RangeOption{Start: offset, End: end})
+		r, err = w.r.cacheFs().OpenRateLimited(func() (io.ReadCloser, error) {
+			return w.r.cachedObject.Object.Open(&fs.RangeOption{Start: offset, End: end})
 		})
 		if err != nil {
 			return nil, err
@@ -320,8 +329,8 @@ func (w *worker) reader(offset, end int64) (io.ReadCloser, error) {
 	}
 
 	_ = w.rc.Close()
-	return w.r.CacheFs().OpenRateLimited(func() (io.ReadCloser, error) {
-		r, err = w.r.cachedObject.Object.Open(&fs.SeekOption{Offset: offset}, &fs.RangeOption{Start: offset, End: end})
+	return w.r.cacheFs().OpenRateLimited(func() (io.ReadCloser, error) {
+		r, err = w.r.cachedObject.Object.Open(&fs.RangeOption{Start: offset, End: end})
 		if err != nil {
 			return nil, err
 		}
@@ -346,27 +355,30 @@ func (w *worker) run() {
 	var err error
 	var data []byte
 	defer w.setRunning(false)
+	defer func() {
+		if w.rc != nil {
+			_ = w.rc.Close()
+			w.setRunning(false)
+		}
+	}()
 
 	for {
 		chunkStart, open := <-w.ch
 		w.setRunning(true)
 		if chunkStart < 0 || !open {
-			if w.rc != nil {
-				_ = w.rc.Close()
-			}
 			break
 		}
 
 		// skip if it exists
 		if w.r.UseMemory {
-			if w.r.Memory().HasChunk(w.r.cachedObject, chunkStart) {
+			if w.r.memory.HasChunk(w.r.cachedObject, chunkStart) {
 				continue
 			}
 
 			// add it in ram if it's in the persistent storage
-			data, err = w.r.Storage().GetChunk(w.r.cachedObject, chunkStart)
+			data, err = w.r.storage().GetChunk(w.r.cachedObject, chunkStart)
 			if err == nil {
-				err = w.r.Memory().AddChunk(w.r.cachedObject, data, chunkStart)
+				err = w.r.memory.AddChunk(w.r.cachedObject, data, chunkStart)
 				if err != nil {
 					fs.Errorf(w, "failed caching chunk in ram %v: %v", chunkStart, err)
 				} else {
@@ -375,12 +387,12 @@ func (w *worker) run() {
 			}
 			err = nil
 		} else {
-			if w.r.Storage().HasChunk(w.r.cachedObject, chunkStart) {
+			if w.r.storage().HasChunk(w.r.cachedObject, chunkStart) {
 				continue
 			}
 		}
 
-		chunkEnd := chunkStart + w.r.CacheFs().chunkSize
+		chunkEnd := chunkStart + w.r.cacheFs().chunkSize
 		if chunkEnd > w.r.cachedObject.Size() {
 			chunkEnd = w.r.cachedObject.Size()
 		}
@@ -405,13 +417,13 @@ func (w *worker) run() {
 		fs.Debugf(w, "downloaded chunk %v", fs.SizeSuffix(chunkStart))
 
 		if w.r.UseMemory {
-			err = w.r.Memory().AddChunk(w.r.cachedObject, data, chunkStart)
+			err = w.r.memory.AddChunk(w.r.cachedObject, data, chunkStart)
 			if err != nil {
 				fs.Errorf(w, "failed caching chunk in ram %v: %v", chunkStart, err)
 			}
 		}
 
-		err = w.r.Storage().AddChunkAhead(w.r.cachedObject.Abs(), data, chunkStart, w.r.chunkAge)
+		err = w.r.storage().AddChunkAhead(w.r.cachedObject.abs(), data, chunkStart, w.r.chunkAge)
 		if err != nil {
 			fs.Errorf(w, "failed caching chunk in storage %v: %v", chunkStart, err)
 		}

@@ -1,3 +1,5 @@
+// +build !plan9
+
 package cache
 
 import (
@@ -71,14 +73,12 @@ func (d *Directory) Fs() fs.Info {
 	return d.CacheFs
 }
 
-// GetCacheFs returns the CacheFS type
-func (d *Directory) GetCacheFs() *Fs {
-	return d.CacheFs
-}
-
 // String returns a human friendly name for this object
 func (d *Directory) String() string {
-	return path.Join(d.Dir, d.Name)
+	if d == nil {
+		return "<nil>"
+	}
+	return d.Remote()
 }
 
 // Remote returns the remote path
@@ -92,9 +92,18 @@ func (d *Directory) Remote() string {
 	return p
 }
 
-// Abs returns the absolute path to the dir
-func (d *Directory) Abs() string {
+// abs returns the absolute path to the dir
+func (d *Directory) abs() string {
 	return cleanPath(path.Join(d.Dir, d.Name))
+}
+
+// parentRemote returns the absolute path parent remote
+func (d *Directory) parentRemote() string {
+	absPath := d.abs()
+	if absPath == "" {
+		return ""
+	}
+	return cleanPath(path.Dir(absPath))
 }
 
 // ModTime returns the cached ModTime
