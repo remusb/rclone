@@ -450,7 +450,7 @@ func (b *Persistent) GetChunk(cachedObject *Object, offset int64) ([]byte, error
 		d = cachedObject.CacheFs.metaAge
 	}
 
-	err = b.db.Batch(func(tx *bolt.Tx) error {
+	err = b.db.Update(func(tx *bolt.Tx) error {
 		b.updateChunkTs(tx, p, offset, d)
 		return nil
 	})
@@ -680,6 +680,7 @@ func (b *Persistent) GetChunkTs(path string, offset int64) (time.Time, error) {
 		tsBucket := tx.Bucket([]byte(DataTsBucket))
 		c := tsBucket.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
+			fs.Errorf(tsVal, "checking %v", string(v))
 			if bytes.Equal(v, []byte(tsVal)) {
 				t = time.Unix(0, btoi(k))
 				return nil

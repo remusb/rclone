@@ -361,7 +361,9 @@ func TestInternalWarmUpInFlight(t *testing.T) {
 	t.Logf("Waiting 10 seconds for warm up to expire\n")
 	time.Sleep(time.Second * 10)
 
+	fs.Errorf(o2, "start read object")
 	_ = readDataFromObj(t, o2, chunkSize, chunkSize*2, false)
+	fs.Errorf(o2, "end read object")
 	require.False(t, cfs.InWarmUp())
 	expectedExpiry = time.Now().Add(chunkAge)
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o2.Remote()), chunkSize)
