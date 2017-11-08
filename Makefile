@@ -38,9 +38,9 @@ test:	rclone
 
 # Quick test
 quicktest:
-	RCLONE_CONFIG="/notfound" go test $(BUILDTAGS) $(GO_FILES)
+	RCLONE_CONFIG="/notfound" go test -v $(BUILDTAGS) github.com/ncw/rclone/cache -verbose
 ifdef GO_LATEST
-	RCLONE_CONFIG="/notfound" go test $(BUILDTAGS) -cpu=2 -race $(GO_FILES)
+	RCLONE_CONFIG="/notfound" go test -v $(BUILDTAGS) -cpu=2 -race github.com/ncw/rclone/cache -verbose
 endif
 
 # Do source code quality checks
