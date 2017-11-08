@@ -450,7 +450,7 @@ func (b *Persistent) GetChunk(cachedObject *Object, offset int64) ([]byte, error
 		d = cachedObject.CacheFs.metaAge
 	}
 
-	err = b.db.Update(func(tx *bolt.Tx) error {
+	err = b.db.Batch(func(tx *bolt.Tx) error {
 		b.updateChunkTs(tx, p, offset, d)
 		return nil
 	})
