@@ -26,12 +26,10 @@ import (
 var (
 	WrapRemote   = flag.String("wrap-remote", "", "Remote to wrap")
 	RemoteName   = flag.String("remote-name", "TestCacheInternal", "Root remote")
-	SkipTimeouts = flag.Bool("skip-waits", false, "To skip tests that have wait times")
 	rootFs       fs.Fs
 	boltDb       *cache.Persistent
-	metaAge      = time.Second * 30
 	infoAge      = time.Second * 10
-	chunkAge     = time.Second * 10
+	chunkClean	 = time.Second
 	okDiff       = time.Second * 9 // really big diff here but the build machines seem to be slow. need a different way for this
 	workers      = 2
 	warmupRate   = 3
@@ -44,7 +42,7 @@ func TestInternalInit(t *testing.T) {
 
 	// delete the default path
 	dbPath := filepath.Join(fs.CacheDir, "cache-backend", *RemoteName+".db")
-	boltDb, err = cache.GetPersistent(dbPath, true)
+	boltDb, err = cache.GetPersistent(dbPath, &cache.Features{PurgeDb: true})
 	require.NoError(t, err)
 	fstest.Initialise()
 
@@ -65,14 +63,14 @@ func TestInternalInit(t *testing.T) {
 		fs.ConfigFileSet(*RemoteName, "type", "cache")
 		fs.ConfigFileSet(*RemoteName, "remote", *WrapRemote)
 		fs.ConfigFileSet(*RemoteName, "chunk_size", "1024")
-		fs.ConfigFileSet(*RemoteName, "chunk_age", chunkAge.String())
+		fs.ConfigFileSet(*RemoteName, "chunk_total_size", "2048")
 		fs.ConfigFileSet(*RemoteName, "info_age", infoAge.String())
 	}
 
-	_ = flag.Set("cache-warm-up-age", metaAge.String())
 	_ = flag.Set("cache-warm-up-rps", fmt.Sprintf("%v/%v", warmupRate, warmupSec))
 	_ = flag.Set("cache-chunk-no-memory", "true")
 	_ = flag.Set("cache-workers", strconv.Itoa(workers))
+	_ = flag.Set("cache-chunk-clean-interval", chunkClean.String())
 
 	// Instantiate root
 	rootFs, err = fs.NewFs(*RemoteName + ":")
@@ -233,7 +231,7 @@ func TestInternalWrappedWrittenContentMatches(t *testing.T) {
 }
 
 func TestInternalLargeWrittenContentMatches(t *testing.T) {
-	t.Skip("FIXME disabled because it is unreliable")
+	//t.Skip("FIXME disabled because it is unreliable")
 
 	cfs, err := getCacheFs(rootFs)
 	require.NoError(t, err)
@@ -306,10 +304,6 @@ func TestInternalChangeSeenAfterDirCacheFlush(t *testing.T) {
 }
 
 func TestInternalWarmUp(t *testing.T) {
-	if *SkipTimeouts {
-		t.Skip("--skip-waits set")
-	}
-
 	reset(t)
 	cfs, err := getCacheFs(rootFs)
 	require.NoError(t, err)
@@ -323,18 +317,18 @@ func TestInternalWarmUp(t *testing.T) {
 	_ = readDataFromObj(t, o2, 0, chunkSize, false)
 
 	// validate a fresh chunk
-	expectedExpiry := time.Now().Add(chunkAge)
+	expectedTs := time.Now()
 	ts, err := boltDb.GetChunkTs(path.Join(rootFs.Root(), o2.Remote()), 0)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, okDiff)
+	require.WithinDuration(t, expectedTs, ts, okDiff)
 
 	// validate that we entered a warm up state
 	_ = readDataFromObj(t, o3, 0, chunkSize, false)
 	require.True(t, cfs.InWarmUp())
-	expectedExpiry = time.Now().Add(metaAge)
+	expectedTs = time.Now()
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o3.Remote()), 0)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, okDiff)
+	require.WithinDuration(t, expectedTs, ts, okDiff)
 
 	// validate that we cooled down and exit warm up
 	// we wait for the cache to expire
@@ -343,17 +337,13 @@ func TestInternalWarmUp(t *testing.T) {
 
 	_ = readDataFromObj(t, o3, chunkSize, chunkSize*2, false)
 	require.False(t, cfs.InWarmUp())
-	expectedExpiry = time.Now().Add(chunkAge)
+	expectedTs = time.Now()
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o3.Remote()), chunkSize)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, okDiff)
+	require.WithinDuration(t, expectedTs, ts, okDiff)
 }
 
 func TestInternalWarmUpInFlight(t *testing.T) {
-	if *SkipTimeouts {
-		t.Skip("--skip-waits set")
-	}
-
 	reset(t)
 	cfs, err := getCacheFs(rootFs)
 	require.NoError(t, err)
@@ -370,10 +360,10 @@ func TestInternalWarmUpInFlight(t *testing.T) {
 	// validate that we entered a warm up state
 	_ = readDataFromObj(t, o3, 0, chunkSize, false)
 	require.True(t, cfs.InWarmUp())
-	expectedExpiry := time.Now().Add(metaAge)
+	expectedTs := time.Now()
 	ts, err := boltDb.GetChunkTs(path.Join(rootFs.Root(), o3.Remote()), 0)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, okDiff)
+	require.WithinDuration(t, expectedTs, ts, okDiff)
 
 	checkSample := make([]byte, chunkSize)
 	reader, err := o3.Open(&fs.SeekOption{Offset: 0})
@@ -394,10 +384,10 @@ func TestInternalWarmUpInFlight(t *testing.T) {
 	}
 	_ = reader.Close()
 	require.True(t, cfs.InWarmUp())
-	expectedExpiry = time.Now().Add(chunkAge)
+	expectedTs = time.Now()
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o3.Remote()), chunkSize*int64(workers+1))
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, okDiff)
+	require.WithinDuration(t, expectedTs, ts, okDiff)
 
 	// validate that we cooled down and exit warm up
 	// we wait for the cache to expire
@@ -406,10 +396,10 @@ func TestInternalWarmUpInFlight(t *testing.T) {
 
 	_ = readDataFromObj(t, o2, chunkSize, chunkSize*2, false)
 	require.False(t, cfs.InWarmUp())
-	expectedExpiry = time.Now().Add(chunkAge)
+	expectedTs = time.Now()
 	ts, err = boltDb.GetChunkTs(path.Join(rootFs.Root(), o2.Remote()), chunkSize)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, okDiff)
+	require.WithinDuration(t, expectedTs, ts, okDiff)
 }
 
 // TODO: this is bugged
@@ -453,10 +443,10 @@ func TestInternalCacheWrites(t *testing.T) {
 
 	// create some rand test data
 	co := writeObjectRandomBytes(t, rootFs, (chunkSize*4 + chunkSize/2))
-	expectedExpiry := time.Now().Add(metaAge)
+	expectedTs := time.Now()
 	ts, err := boltDb.GetChunkTs(path.Join(rootFs.Root(), co.Remote()), 0)
 	require.NoError(t, err)
-	require.WithinDuration(t, expectedExpiry, ts, okDiff)
+	require.WithinDuration(t, expectedTs, ts, okDiff)
 
 	// reset fs
 	_ = flag.Set("cache-writes", "false")
@@ -464,43 +454,37 @@ func TestInternalCacheWrites(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestInternalExpiredChunkRemoved(t *testing.T) {
-	t.Skip("FIXME disabled because it is unreliable")
-
-	if *SkipTimeouts {
-		t.Skip("--skip-waits set")
-	}
-
+func TestInternalMaxChunkSizeRespected(t *testing.T) {
+	//t.Skip("FIXME disabled because it is unreliable")
 	reset(t)
+	_ = flag.Set("cache-chunk-clean-interval", "1s")
+	rootFs, err := fs.NewFs(*RemoteName + ":")
+	require.NoError(t, err)
 	cfs, err := getCacheFs(rootFs)
 	require.NoError(t, err)
 	chunkSize := cfs.ChunkSize()
 	totalChunks := 20
 
 	// create some rand test data
-	co := writeObjectRandomBytes(t, cfs, (int64(totalChunks-1)*chunkSize + chunkSize/2))
-	remote := co.Remote()
-	// cache all the chunks
-	_ = readDataFromObj(t, co, 0, co.Size(), false)
-
-	// we wait for the cache to expire
-	t.Logf("Waiting %v for cache to expire\n", chunkAge.String())
-	time.Sleep(chunkAge)
-	_, _ = cfs.List("")
-	time.Sleep(time.Second * 2)
-
-	o, err := cfs.NewObject(remote)
-	require.NoError(t, err)
-	co2, ok := o.(*cache.Object)
+	o := writeObjectRandomBytes(t, cfs, (int64(totalChunks-1)*chunkSize + chunkSize/2))
+	co, ok := o.(*cache.Object)
 	require.True(t, ok)
-	require.False(t, boltDb.HasChunk(co2, 0))
+
+	_ = readDataFromObj(t, co, 0, chunkSize, false)
+	require.True(t, boltDb.HasChunk(co, 0))
+	_ = readDataFromObj(t, co, chunkSize, chunkSize*2, false)
+	_ = readDataFromObj(t, co, chunkSize*2, chunkSize*3, false)
+	require.True(t, boltDb.HasChunk(co, chunkSize))
+	require.True(t, boltDb.HasChunk(co, chunkSize*2))
+	require.False(t, boltDb.HasChunk(co, 0))
+
+	// reset fs
+	_ = flag.Set("cache-chunk-clean-interval", chunkClean.String())
+	rootFs, err = fs.NewFs(*RemoteName + ":")
+	require.NoError(t, err)
 }
 
 func TestInternalExpiredEntriesRemoved(t *testing.T) {
-	if *SkipTimeouts {
-		t.Skip("--skip-waits set")
-	}
-
 	reset(t)
 	cfs, err := getCacheFs(rootFs)
 	require.NoError(t, err)

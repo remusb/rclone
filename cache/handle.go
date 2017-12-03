@@ -27,7 +27,6 @@ type Handle struct {
 	TotalWorkers int
 	UseMemory    bool
 	workers      []*worker
-	chunkAge     time.Duration
 	warmup       bool
 	closed       bool
 }
@@ -42,14 +41,10 @@ func NewObjectHandle(o *Object) *Handle {
 		ReadRetries:  o.CacheFs.readRetries,
 		TotalWorkers: o.CacheFs.totalWorkers,
 		UseMemory:    o.CacheFs.chunkMemory,
-		chunkAge:     o.CacheFs.chunkAge,
 		warmup:       o.CacheFs.InWarmUp(),
 	}
 	r.seenOffsets = make(map[int64]bool)
-	r.memory = NewMemory(o.CacheFs.chunkAge)
-	if o.CacheFs.InWarmUp() {
-		r.chunkAge = o.CacheFs.metaAge
-	}
+	r.memory = NewMemory(-1)
 
 	// create a larger buffer to queue up requests
 	r.preloadQueue = make(chan int64, r.TotalWorkers*10)
@@ -97,6 +92,12 @@ func (r *Handle) startReadWorkers() {
 // queueOffset will send an offset to the workers if it's different from the last one
 func (r *Handle) queueOffset(offset int64) {
 	if offset != r.preloadOffset {
+		// clean past in-memory chunks
+		if r.UseMemory {
+			go r.memory.CleanChunksByNeed(offset)
+		}
+		go r.cacheFs().CleanUpCache(false)
+
 		r.preloadOffset = offset
 		previousChunksCounter := 0
 		maxOffset := r.cacheFs().chunkSize * int64(r.cacheFs().originalSettingWorkers())
@@ -119,8 +120,7 @@ func (r *Handle) queueOffset(offset int64) {
 		// we should then disable warm up setting for this handle
 		if r.warmup && previousChunksCounter >= r.cacheFs().originalSettingWorkers() {
 			r.TotalWorkers = r.cacheFs().originalSettingWorkers()
-			r.UseMemory = !r.cacheFs().originalSettingChunkNoMemory()
-			r.chunkAge = r.cacheFs().chunkAge
+			r.UseMemory = r.cacheFs().originalSettingChunkMemory()
 			r.warmup = false
 			fs.Infof(r, "disabling warm up")
 		}
@@ -171,10 +171,7 @@ func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
 	r.queueOffset(chunkStart)
 	found := false
 
-	// delete old chunks from memory
 	if r.UseMemory {
-		go r.memory.CleanChunksByNeed(chunkStart)
-
 		data, err = r.memory.GetChunk(r.cachedObject, chunkStart)
 		if err == nil {
 			found = true
@@ -222,6 +219,10 @@ func (r *Handle) Read(p []byte) (n int, err error) {
 	defer r.mu.Unlock()
 	var buf []byte
 
+	if r.offset == 0 {
+		fs.Errorf(r, "%v", r.cacheFs().plexConnector.isPlaying(r.cachedObject))
+	}
+
 	currentOffset := r.offset
 	buf, err = r.getChunk(currentOffset)
 	if err != nil && len(buf) == 0 {
@@ -257,6 +258,7 @@ func (r *Handle) Close() error {
 		}
 	}
 
+	go r.cacheFs().CleanUpCache(false)
 	fs.Debugf(r, "cache reader closed %v", r.offset)
 	return nil
 }
@@ -377,7 +379,7 @@ func (w *worker) run() {
 			// add it in ram if it's in the persistent storage
 			data, err = w.r.storage().GetChunk(w.r.cachedObject, chunkStart)
 			if err == nil {
-				err = w.r.memory.AddChunk(w.r.cachedObject, data, chunkStart)
+				err = w.r.memory.AddChunk(w.r.cachedObject.abs(), data, chunkStart)
 				if err != nil {
 					fs.Errorf(w, "failed caching chunk in ram %v: %v", chunkStart, err)
 				} else {
@@ -416,13 +418,13 @@ func (w *worker) run() {
 		fs.Debugf(w, "downloaded chunk %v", fs.SizeSuffix(chunkStart))
 
 		if w.r.UseMemory {
-			err = w.r.memory.AddChunk(w.r.cachedObject, data, chunkStart)
+			err = w.r.memory.AddChunk(w.r.cachedObject.abs(), data, chunkStart)
 			if err != nil {
 				fs.Errorf(w, "failed caching chunk in ram %v: %v", chunkStart, err)
 			}
 		}
 
-		err = w.r.storage().AddChunkAhead(w.r.cachedObject.abs(), data, chunkStart, w.r.chunkAge)
+		err = w.r.storage().AddChunk(w.r.cachedObject.abs(), data, chunkStart)
 		if err != nil {
 			fs.Errorf(w, "failed caching chunk in storage %v: %v", chunkStart, err)
 		}

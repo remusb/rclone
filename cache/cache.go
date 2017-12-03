@@ -26,12 +26,12 @@ import (
 const (
 	// DefCacheChunkSize is the default value for chunk size
 	DefCacheChunkSize = "5M"
+	// DefCacheTotalChunkSize is the default value for the maximum size of stored chunks
+	DefCacheTotalChunkSize = "10G"
+	// DefCacheChunkCleanInterval is the interval at which chunks are cleaned
+	DefCacheChunkCleanInterval = "1m"
 	// DefCacheInfoAge is the default value for object info age
 	DefCacheInfoAge = "6h"
-	// DefCacheChunkAge is the default value for chunk age duration
-	DefCacheChunkAge = "3h"
-	// DefCacheMetaAge is the default value for chunk age duration
-	DefCacheMetaAge = "3h"
 	// DefCacheReadRetries is the default value for read retries
 	DefCacheReadRetries = 3
 	// DefCacheTotalWorkers is how many workers run in parallel to download chunks
@@ -52,9 +52,9 @@ var (
 	cacheDbPath        = fs.StringP("cache-db-path", "", filepath.Join(fs.CacheDir, "cache-backend"), "Directory to cache DB")
 	cacheDbPurge       = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
 	cacheChunkSize     = fs.StringP("cache-chunk-size", "", DefCacheChunkSize, "The size of a chunk")
+	cacheTotalChunkSize	= fs.StringP("cache-total-chunk-size", "", DefCacheTotalChunkSize, "The size of a chunk")
+	cacheChunkCleanInterval       = fs.StringP("cache-chunk-clean-interval", "", DefCacheChunkCleanInterval, "Interval at which chunk cleanup runs")
 	cacheInfoAge       = fs.StringP("cache-info-age", "", DefCacheInfoAge, "How much time should object info be stored in cache")
-	cacheChunkAge      = fs.StringP("cache-chunk-age", "", DefCacheChunkAge, "How much time should a chunk be in cache before cleanup")
-	cacheMetaAge       = fs.StringP("cache-warm-up-age", "", DefCacheMetaAge, "How much time should data be cached during warm up")
 	cacheReadRetries   = fs.IntP("cache-read-retries", "", DefCacheReadRetries, "How many times to retry a read from a cache storage")
 	cacheTotalWorkers  = fs.IntP("cache-workers", "", DefCacheTotalWorkers, "How many workers should run in parallel to download chunks")
 	cacheChunkNoMemory = fs.BoolP("cache-chunk-no-memory", "", DefCacheChunkNoMemory, "Disable the in-memory cache for storing chunks during streaming")
@@ -72,6 +72,19 @@ func init() {
 		Options: []fs.Option{{
 			Name: "remote",
 			Help: "Remote to cache.\nNormally should contain a ':' and a path, eg \"myremote:path/to/dir\",\n\"myremote:bucket\" or maybe \"myremote:\" (not recommended).",
+		}, {
+			Name: "plex_url",
+			Help: "Optional: The URL of the Plex server",
+			Optional: true,
+		}, {
+			Name: "plex_username",
+			Help: "Optional: The username of the Plex user",
+			Optional: true,
+		}, {
+			Name: "plex_password",
+			Help: "Optional: The password of the Plex user",
+			IsPassword: true,
+			Optional: true,
 		}, {
 			Name: "chunk_size",
 			Help: "The size of a chunk. Lower value good for slow connections but can affect seamless reading. \nDefault: " + DefCacheChunkSize,
@@ -105,34 +118,18 @@ func init() {
 			},
 			Optional: true,
 		}, {
-			Name: "chunk_age",
-			Help: "How much time should a chunk (file data) be stored in cache. \nAccepted units are: \"s\", \"m\", \"h\".\nDefault: " + DefCacheChunkAge,
+			Name: "chunk_total_size",
+			Help: "The maximum size of stored chunks. When the storage grows beyond this size, the oldest chunks will be deleted. \nDefault: " + DefCacheTotalChunkSize,
 			Examples: []fs.OptionExample{
 				{
-					Value: "30s",
-					Help:  "30 seconds",
+					Value: "500M",
+					Help:  "500 MB",
 				}, {
-					Value: "1m",
-					Help:  "1 minute",
+					Value: "1G",
+					Help:  "1 GB",
 				}, {
-					Value: "1h30m",
-					Help:  "1 hour and 30 minutes",
-				},
-			},
-			Optional: true,
-		}, {
-			Name: "warmup_age",
-			Help: "How much time should data be cached during warm up. \nAccepted units are: \"s\", \"m\", \"h\".\nDefault: " + DefCacheMetaAge,
-			Examples: []fs.OptionExample{
-				{
-					Value: "3h",
-					Help:  "3 hours",
-				}, {
-					Value: "6h",
-					Help:  "6 hours",
-				}, {
-					Value: "24h",
-					Help:  "24 hours",
+					Value: "10G",
+					Help:  "10 GB",
 				},
 			},
 			Optional: true,
@@ -149,10 +146,7 @@ type ChunkStorage interface {
 	GetChunk(cachedObject *Object, offset int64) ([]byte, error)
 
 	// add a new chunk
-	AddChunk(cachedObject *Object, data []byte, offset int64) error
-
-	// AddChunkAhead adds a new chunk before caching an Object for it
-	AddChunkAhead(fp string, data []byte, offset int64, t time.Duration) error
+	AddChunk(fp string, data []byte, offset int64) error
 
 	// if the storage can cleanup on a cron basis
 	// otherwise it can do a noop operation
@@ -161,6 +155,10 @@ type ChunkStorage interface {
 	// if the storage can cleanup chunks after we no longer need them
 	// otherwise it can do a noop operation
 	CleanChunksByNeed(offset int64)
+
+	// if the storage can cleanup chunks after the total size passes a certain point
+	// otherwise it can do a noop operation
+	CleanChunksBySize(maxSize int64)
 }
 
 // Storage is a storage type (Bolt) which needs to support both chunk and file based operations
@@ -214,8 +212,8 @@ type Fs struct {
 
 	fileAge              time.Duration
 	chunkSize            int64
-	chunkAge             time.Duration
-	metaAge              time.Duration
+	chunkTotalSize			 int64
+	chunkCleanInterval	 time.Duration
 	readRetries          int
 	totalWorkers         int
 	chunkMemory          bool
@@ -232,6 +230,7 @@ type Fs struct {
 	cleanupMu         sync.Mutex
 	warmupMu          sync.Mutex
 	rateLimiter       *rate.Limiter
+	plexConnector			*plexConnector
 }
 
 // NewFs contstructs an Fs from the path, container:path
@@ -250,6 +249,9 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	}
 	fs.Debugf(name, "wrapped %v:%v at root %v", wrappedFs.Name(), wrappedFs.Root(), rpath)
 
+	plex_url := fs.ConfigFileGet(name, "plex_url")
+	plex_token := fs.ConfigFileGet(name, "plex_token")
+
 	var chunkSize fs.SizeSuffix
 	chunkSizeString := fs.ConfigFileGet(name, "chunk_size", DefCacheChunkSize)
 	if *cacheChunkSize != DefCacheChunkSize {
@@ -259,6 +261,20 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to understand chunk size", chunkSizeString)
 	}
+	var chunkTotalSize fs.SizeSuffix
+	chunkTotalSizeString := fs.ConfigFileGet(name, "chunk_total_size", DefCacheTotalChunkSize)
+	if *cacheTotalChunkSize != DefCacheTotalChunkSize {
+		chunkTotalSizeString = *cacheTotalChunkSize
+	}
+	err = chunkTotalSize.Set(chunkTotalSizeString)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to understand chunk total size", chunkTotalSizeString)
+	}
+	chunkCleanIntervalStr := *cacheChunkCleanInterval
+	chunkCleanInterval, err := time.ParseDuration(chunkCleanIntervalStr)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to understand duration %v", chunkCleanIntervalStr)
+	}
 	infoAge := fs.ConfigFileGet(name, "info_age", DefCacheInfoAge)
 	if *cacheInfoAge != DefCacheInfoAge {
 		infoAge = *cacheInfoAge
@@ -266,22 +282,6 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	infoDuration, err := time.ParseDuration(infoAge)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to understand duration", infoAge)
-	}
-	chunkAge := fs.ConfigFileGet(name, "chunk_age", DefCacheChunkAge)
-	if *cacheChunkAge != DefCacheChunkAge {
-		chunkAge = *cacheChunkAge
-	}
-	chunkDuration, err := time.ParseDuration(chunkAge)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to understand duration", chunkAge)
-	}
-	metaAge := fs.ConfigFileGet(name, "warmup_age", DefCacheMetaAge)
-	if *cacheMetaAge != DefCacheMetaAge {
-		metaAge = *cacheMetaAge
-	}
-	metaDuration, err := time.ParseDuration(metaAge)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to understand duration", metaAge)
 	}
 	warmupRps := strings.Split(*cacheWarmUp, "/")
 	warmupRate, err := strconv.Atoi(warmupRps[0])
@@ -302,8 +302,8 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		root:                 rpath,
 		fileAge:              infoDuration,
 		chunkSize:            int64(chunkSize),
-		chunkAge:             chunkDuration,
-		metaAge:              metaDuration,
+		chunkTotalSize:				int64(chunkTotalSize),
+		chunkCleanInterval:		chunkCleanInterval,
 		readRetries:          *cacheReadRetries,
 		totalWorkers:         *cacheTotalWorkers,
 		originalTotalWorkers: *cacheTotalWorkers,
@@ -319,6 +319,35 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	}
 	f.rateLimiter = rate.NewLimiter(rate.Limit(float64(*cacheRps)), f.totalWorkers)
 
+	f.plexConnector = &plexConnector{}
+	if plex_url != "" {
+		if plex_token != "" {
+			f.plexConnector, err = newPlexConnectorWithToken(f, plex_url, plex_token)
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to connect to the Plex API %v", plex_url)
+			}
+		} else {
+			plex_username := fs.ConfigFileGet(name, "plex_username")
+			plex_password := fs.ConfigFileGet(name, "plex_password")
+			if plex_password != "" && plex_username != "" {
+				dec_pass, err := fs.Reveal(plex_password)
+				if err != nil {
+					dec_pass = plex_password
+				}
+				f.plexConnector, err = newPlexConnector(f, plex_url, plex_username, dec_pass)
+				if err != nil {
+					return nil, errors.Wrapf(err, "failed to connect to the Plex API %v", plex_url)
+				}
+				if f.plexConnector.token != "" {
+					fs.ConfigFileSet(name, "plex_token", f.plexConnector.token)
+					fs.SaveConfig()
+				}
+			}
+		}
+
+		fs.Infof(name, "Connected to Plex server: %v", plex_url)
+	}
+
 	dbPath := *cacheDbPath
 	if filepath.Ext(dbPath) != "" {
 		dbPath = filepath.Dir(dbPath)
@@ -330,7 +359,9 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 
 	dbPath = filepath.Join(dbPath, name+".db")
 	fs.Infof(name, "Storage DB path: %v", dbPath)
-	f.cache, err = GetPersistent(dbPath, *cacheDbPurge)
+	f.cache, err = GetPersistent(dbPath, &Features{
+		PurgeDb:							*cacheDbPurge,
+	})
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to start cache db")
 	}
@@ -347,9 +378,10 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 
 	fs.Infof(name, "Chunk Memory: %v", f.chunkMemory)
 	fs.Infof(name, "Chunk Size: %v", fs.SizeSuffix(f.chunkSize))
+	fs.Infof(name, "Chunk Total Size: %v", fs.SizeSuffix(f.chunkTotalSize))
+	fs.Infof(name, "Chunk Clean Interval: %v", f.chunkCleanInterval.String())
 	fs.Infof(name, "Workers: %v", f.totalWorkers)
 	fs.Infof(name, "File Age: %v", f.fileAge.String())
-	fs.Infof(name, "Chunk Age: %v", f.chunkAge.String())
 	fs.Infof(name, "Cache Writes: %v", f.cacheWrites)
 
 	go f.CleanUpCache(false)
@@ -414,8 +446,8 @@ func (f *Fs) originalSettingWorkers() int {
 	return f.originalTotalWorkers
 }
 
-// originalSettingChunkNoMemory will return the original value of this config
-func (f *Fs) originalSettingChunkNoMemory() bool {
+// originalSettingChunkMemory will return the original value of this config
+func (f *Fs) originalSettingChunkMemory() bool {
 	return f.originalChunkMemory
 }
 
@@ -434,7 +466,7 @@ func (f *Fs) enableWarmUp() {
 // disableWarmUp will disable the warm up state of this cache along with the relevant settings
 func (f *Fs) disableWarmUp() {
 	f.totalWorkers = f.originalSettingWorkers()
-	f.chunkMemory = !f.originalSettingChunkNoMemory()
+	f.chunkMemory = f.originalSettingChunkMemory()
 	f.warmUp = false
 }
 
@@ -665,7 +697,7 @@ func (f *Fs) cacheReader(u io.Reader, src fs.ObjectInfo, originalRead func(inn i
 			// if we have some bytes we cache them
 			if readSize > 0 {
 				chunk = chunk[:readSize]
-				err2 := f.cache.AddChunkAhead(cleanPath(path.Join(f.root, src.Remote())), chunk, offset, f.metaAge)
+				err2 := f.cache.AddChunk(cleanPath(path.Join(f.root, src.Remote())), chunk, offset)
 				if err2 != nil {
 					fs.Errorf(src, "error saving new data in cache '%v'", err2)
 					_ = pr.CloseWithError(err2)
@@ -920,9 +952,9 @@ func (f *Fs) CleanUpCache(ignoreLastTs bool) {
 	f.cleanupMu.Lock()
 	defer f.cleanupMu.Unlock()
 
-	if ignoreLastTs || time.Now().After(f.lastChunkCleanup.Add(f.chunkAge/4)) {
+	if ignoreLastTs || time.Now().After(f.lastChunkCleanup.Add(f.chunkCleanInterval)) {
 		fs.Infof("cache", "running chunks cleanup")
-		f.cache.CleanChunksByAge(f.chunkAge)
+		f.cache.CleanChunksBySize(f.chunkTotalSize)
 		f.lastChunkCleanup = time.Now()
 	}
 
