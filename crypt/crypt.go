@@ -145,6 +145,9 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 			return doDirChangeNotify(wrappedNotifyFunc, pollInterval)
 		}
 	}
+	if wrapSupporter, ok := wrappedFs.(fs.Wrapper); ok {
+		wrapSupporter.SetWrapper(f)
+	}
 
 	return f, err
 }
