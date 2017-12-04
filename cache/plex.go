@@ -61,6 +61,7 @@ func newPlexConnectorWithToken(f *Fs, plexUrl, token string) (*plexConnector, er
 	return pc, nil
 }
 
+// fillDefaultHeaders will add common headers to requests
 func (p *plexConnector) fillDefaultHeaders(req *http.Request) {
 	req.Header.Add("X-Plex-Client-Identifier", fmt.Sprintf("rclone (%v)", p.f.String()))
 	req.Header.Add("X-Plex-Product", fmt.Sprintf("rclone (%v)", p.f.Name()))
@@ -100,6 +101,7 @@ func (p *plexConnector) authenticate(username, password string) error {
 	return nil
 }
 
+// isConnected checks if this Plex
 func (p *plexConnector) isConnected() bool {
 	return p.token != ""
 }

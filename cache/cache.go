@@ -225,6 +225,7 @@ type Fs struct {
 	cacheWrites          bool
 	originalTotalWorkers int
 	originalChunkMemory  bool
+	maxWorkers					 int
 
 	lastChunkCleanup  time.Time
 	lastRootCleanup   time.Time
@@ -309,6 +310,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		readRetries:          *cacheReadRetries,
 		totalWorkers:         *cacheTotalWorkers,
 		originalTotalWorkers: *cacheTotalWorkers,
+		maxWorkers:						*cacheTotalWorkers,
 		chunkMemory:          !*cacheChunkNoMemory,
 		originalChunkMemory:  !*cacheChunkNoMemory,
 		warmUp:               false,
