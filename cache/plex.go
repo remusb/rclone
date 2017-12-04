@@ -87,7 +87,11 @@ func (p *plexConnector) authenticate(username, password string) error {
 	}
 	var data map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&data)
-	token, ok := get(data, "user", "authToken").(string)
+	tokenGen, ok := get(data, "user", "authToken")
+	if !ok {
+		return errors.New("failed to parse token")
+	}
+	token, ok := tokenGen.(string)
 	if !ok {
 		return errors.New("failed to parse token")
 	}
@@ -113,21 +117,35 @@ func (p *plexConnector) isPlaying(co *Object) bool {
 	}
 	var data map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&data)
-	size, ok := get(data, "MediaContainer", "size").(float64)
+	sizeGen, ok := get(data, "MediaContainer", "size")
+	if !ok {
+		fs.Errorf("plex", "empty container: %v", data)
+		return false
+	}
+	size, ok := sizeGen.(float64)
 	if !ok || size < float64(1) {
 		fs.Errorf("plex", "empty container: %v", data)
 		return false
 	}
-	videos, ok := get(data, "MediaContainer", "Video").([]interface{})
+	videosGen, ok := get(data, "MediaContainer", "Video")
+	if !ok {
+		fs.Errorf("plex", "empty videos: %v", data)
+		return false
+	}
+	videos, ok := videosGen.([]interface{})
 	if !ok || len(videos) < 1 {
 		fs.Errorf("plex", "empty videos: %v", data)
 		return false
 	}
-	fs.Errorf("plex", "got videos: %v", videos)
 	for _, v := range videos {
-		key, ok := get(v, "key").(string)
+		keyGen, ok := get(v, "key")
 		if !ok {
-			fs.Errorf("failed to understand: %v", key)
+			fs.Errorf("plex", "failed to find: key")
+			continue
+		}
+		key, ok := keyGen.(string)
+		if !ok {
+			fs.Errorf("plex", "failed to understand: key")
 			continue
 		}
 		req, err := http.NewRequest("GET", fmt.Sprintf("%s%s", p.url.String(), key), nil)
@@ -142,13 +160,26 @@ func (p *plexConnector) isPlaying(co *Object) bool {
 		var data map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&data)
 
-		fp, ok := get(data, "MediaContainer", "Metadata", 0, "Media", 0, "Part", 0, "file").(string)
+		remote := co.Remote()
+		if cr, yes := co.CacheFs.isWrappedByCrypt(); yes {
+			remote, err = cr.DecryptFileName(co.Remote())
+			if err != nil {
+				fs.Errorf("plex", "can not decrypt wrapped file: %v", err)
+				continue
+			}
+		}
+		fpGen, ok := get(data, "MediaContainer", "Metadata", 0, "Media", 0, "Part", 0, "file")
 		if !ok {
-			fs.Errorf("failed to understand: %v", fp)
+			fs.Errorf("plex", "failed to understand: %v", data)
 			continue
 		}
-		fs.Errorf("plex", "searching %v in %v", co.Remote(), fp)
-		if strings.Contains(fp, co.Remote()) {
+		fp, ok := fpGen.(string)
+		if !ok {
+			fs.Errorf("plex", "failed to understand: %v", fp)
+			continue
+		}
+		fs.Errorf("plex", "searching %v in %v", remote, fp)
+		if strings.Contains(fp, remote) {
 			isPlaying = true
 			break
 		}
@@ -158,14 +189,26 @@ func (p *plexConnector) isPlaying(co *Object) bool {
 }
 
 // credit: https://stackoverflow.com/a/28878037
-func get(m interface{}, path ...interface{}) interface{} {
+func get(m interface{}, path ...interface{}) (interface{}, bool) {
 	for _, p := range path {
 		switch idx := p.(type) {
 		case string:
-			m = m.(map[string]interface{})[idx]
+			if mm, ok := m.(map[string]interface{}); ok {
+				if val, found := mm[idx]; found {
+					m = val
+					continue
+				}
+			}
+			return nil, false
 		case int:
-			m = m.([]interface{})[idx]
+			if mm, ok := m.([]interface{}); ok {
+				if len(mm) > idx {
+					m = mm[idx]
+					continue
+				}
+			}
+			return nil, false
 		}
 	}
-	return m
+	return m, true
 }

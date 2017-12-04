@@ -21,6 +21,7 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	"golang.org/x/time/rate"
+	"github.com/ncw/rclone/crypt"
 )
 
 const (
@@ -986,6 +987,15 @@ func (f *Fs) WrapFs() fs.Fs {
 func (f *Fs) SetWrapper(wrapper fs.Fs) {
 	f.wrapper = wrapper
 	fs.Errorf(f, "setting wrapper %v: %T", f.wrapper.String(), f.wrapper)
+}
+
+// Wrap returns the Fs that is wrapping this Fs
+func (f *Fs) isWrappedByCrypt() (*crypt.Fs, bool) {
+	if f.wrapper == nil {
+		return nil, false
+	}
+	c, ok := f.wrapper.(*crypt.Fs)
+	return c, ok
 }
 
 // DirCacheFlush flushes the dir cache
