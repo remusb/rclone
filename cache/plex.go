@@ -10,6 +10,7 @@ import(
 	"encoding/json"
 	"strings"
 	"github.com/pkg/errors"
+	"time"
 )
 
 const (
@@ -188,6 +189,12 @@ func (p *plexConnector) isPlaying(co *Object) bool {
 	}
 
 	return isPlaying
+}
+
+func (p *plexConnector) isPlayingAsync(co *Object, response chan bool) {
+	time.Sleep(time.Second * 3) // FIXME random guess here
+	res := p.isPlaying(co)
+	response <- res
 }
 
 // credit: https://stackoverflow.com/a/28878037

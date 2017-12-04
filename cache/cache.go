@@ -225,7 +225,7 @@ type Fs struct {
 	cacheWrites          bool
 	originalTotalWorkers int
 	originalChunkMemory  bool
-	maxWorkers					 int
+	totalMaxWorkers			 int
 
 	lastChunkCleanup  time.Time
 	lastRootCleanup   time.Time
@@ -310,7 +310,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		readRetries:          *cacheReadRetries,
 		totalWorkers:         *cacheTotalWorkers,
 		originalTotalWorkers: *cacheTotalWorkers,
-		maxWorkers:						*cacheTotalWorkers,
+		totalMaxWorkers:			*cacheTotalWorkers,
 		chunkMemory:          !*cacheChunkNoMemory,
 		originalChunkMemory:  !*cacheChunkNoMemory,
 		warmUp:               false,
@@ -325,11 +325,14 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 
 	f.plexConnector = &plexConnector{}
 	if plex_url != "" {
+		usingPlex := false
+
 		if plex_token != "" {
 			f.plexConnector, err = newPlexConnectorWithToken(f, plex_url, plex_token)
 			if err != nil {
 				return nil, errors.Wrapf(err, "failed to connect to the Plex API %v", plex_url)
 			}
+			usingPlex = true
 		} else {
 			plex_username := fs.ConfigFileGet(name, "plex_username")
 			plex_password := fs.ConfigFileGet(name, "plex_password")
@@ -346,10 +349,16 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 					fs.ConfigFileSet(name, "plex_token", f.plexConnector.token)
 					fs.SaveConfig()
 				}
+				usingPlex = true
 			}
 		}
 
-		fs.Infof(name, "Connected to Plex server: %v", plex_url)
+		if usingPlex {
+			fs.Infof(name, "Connected to Plex server: %v", plex_url)
+			// when connected to a Plex server we default to 1 worker (Plex scans all the time)
+			// and leave max workers as a setting to scale out the workers on demand during playback
+			f.totalWorkers = 1
+		}
 	}
 
 	dbPath := *cacheDbPath
@@ -936,25 +945,25 @@ func (f *Fs) CheckIfWarmupNeeded(remote string) {
 	f.warmupMu.Lock()
 	defer f.warmupMu.Unlock()
 
-	secondCount := time.Duration(f.warmUpSec)
-	rate := f.warmUpRate
-
-	// clean up entries older than the needed time frame needed
-	for k, v := range f.lastOpenedEntries {
-		if time.Now().After(v.Add(time.Second * secondCount)) {
-			delete(f.lastOpenedEntries, k)
-		}
-	}
-	f.lastOpenedEntries[remote] = time.Now()
+	//secondCount := time.Duration(f.warmUpSec)
+	//rate := f.warmUpRate
+	//
+	//// clean up entries older than the needed time frame needed
+	//for k, v := range f.lastOpenedEntries {
+	//	if time.Now().After(v.Add(time.Second * secondCount)) {
+	//		delete(f.lastOpenedEntries, k)
+	//	}
+	//}
+	//f.lastOpenedEntries[remote] = time.Now()
 
 	// simple check for the current load
-	if len(f.lastOpenedEntries) >= rate && !f.warmUp {
-		fs.Infof(f, "turning on cache warmup")
-		f.enableWarmUp()
-	} else if len(f.lastOpenedEntries) < rate && f.warmUp {
-		fs.Infof(f, "turning off cache warmup")
-		f.disableWarmUp()
-	}
+	//if len(f.lastOpenedEntries) >= rate && !f.warmUp {
+	//	fs.Infof(f, "turning on cache warmup")
+	//	f.enableWarmUp()
+	//} else if len(f.lastOpenedEntries) < rate && f.warmUp {
+	//	fs.Infof(f, "turning off cache warmup")
+	//	f.disableWarmUp()
+	//}
 }
 
 // CleanUpCache will cleanup only the cache data that is expired
