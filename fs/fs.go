@@ -301,7 +301,7 @@ type Features struct {
 	// UnWrap returns the Fs that this Fs is wrapping
 	UnWrap func() Fs
 
-	// Wrap returns the Fs that is wrapping this Fs
+	// WrapFs returns the Fs that is wrapping this Fs
 	WrapFs func() Fs
 
 	// SetWrapper sets the Fs that is wrapping this Fs
@@ -510,6 +510,15 @@ func (ft *Features) Wrap(f Fs) *Features {
 		copy.SetWrapper = do.SetWrapper
 	}
 	return copy
+}
+
+// WrapsFs adds extra information between `f` which wraps `w`
+func (ft *Features) WrapsFs(f Fs, w Fs) *Features {
+	wFeatures := w.Features()
+	if wFeatures.WrapFs != nil && wFeatures.SetWrapper != nil {
+		wFeatures.SetWrapper(f)
+	}
+	return ft
 }
 
 // Purger is an optional interfaces for Fs

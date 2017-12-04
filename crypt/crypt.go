@@ -129,7 +129,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		WriteMimeType:           false,
 		BucketBased:             true,
 		CanHaveEmptyDirectories: true,
-	}).Fill(f).Mask(wrappedFs)
+	}).Fill(f).Mask(wrappedFs).WrapsFs(f, wrappedFs)
 
 	doDirChangeNotify := wrappedFs.Features().DirChangeNotify
 	if doDirChangeNotify != nil {
@@ -144,9 +144,6 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 			}
 			return doDirChangeNotify(wrappedNotifyFunc, pollInterval)
 		}
-	}
-	if wrapSupporter, ok := wrappedFs.(fs.Wrapper); ok {
-		wrapSupporter.SetWrapper(f)
 	}
 
 	return f, err

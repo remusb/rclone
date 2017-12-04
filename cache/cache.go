@@ -426,11 +426,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		UnWrap:                  f.UnWrap,
 		WrapFs:                  f.WrapFs,
 		SetWrapper:              f.SetWrapper,
-	}).Fill(f).Mask(wrappedFs)
-
-	if wrapSupporter, ok := wrappedFs.(fs.Wrapper); ok {
-		wrapSupporter.SetWrapper(f)
-	}
+	}).Fill(f).Mask(wrappedFs).WrapsFs(f, wrappedFs)
 
 	return f, wrapErr
 }
@@ -989,7 +985,7 @@ func (f *Fs) UnWrap() fs.Fs {
 	return f.Fs
 }
 
-// Wrap returns the Fs that is wrapping this Fs
+// WrapFs returns the Fs that is wrapping this Fs
 func (f *Fs) WrapFs() fs.Fs {
 	return f.wrapper
 }
