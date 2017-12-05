@@ -27,7 +27,7 @@ c) Copy remote
 s) Set configuration password
 q) Quit config
 n/r/c/s/q> n
-name> remote
+name> test-cache
 Type of storage to configure.
 Choose a number from below, or type in your own value
 ...
@@ -73,16 +73,6 @@ Choose a number from below, or type in your own value
  3 / 24 hours
    \ "48h"
 info_age> 2
-How much time should a chunk (file data) be stored in cache.
-Accepted units are: "s", "m", "h".
-Default: 3h
-Choose a number from below, or type in your own value
- 1 / 30 seconds
-   \ "30s"
- 2 / 1 minute
-   \ "1m"
- 3 / 1 hour and 30 minutes
-   \ "1h30m"
 The maximum size of stored chunks. When the storage grows beyond this size, the oldest chunks will be deleted.
 Default: 10G
 Choose a number from below, or type in your own value
@@ -139,6 +129,7 @@ and cloud providers, the cache remote can split multiple requests to the
 cloud provider for smaller file chunks and combines them together locally
 where they can be available almost immediately before the reader usually
 needs them.
+
 This is similar to buffering when media files are played online. Rclone
 will stay around the current marker but always try its best to stay ahead
 and prepare the data before.
@@ -295,7 +286,7 @@ setting useless but it is available to set for more special cases.
 **NOTE**: This will limit the number of requests during streams but other
 API calls to the cloud provider like directory listings will still pass.
 
-**Default**: 4
+**Default**: disabled
 
 #### --cache-writes ####
 
