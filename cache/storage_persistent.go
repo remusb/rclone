@@ -29,8 +29,9 @@ const (
 	DataTsBucket = "dataTs"
 )
 
+// Features flags for this storage type
 type Features struct {
-	PurgeDb         			bool // purge the db before starting
+	PurgeDb bool // purge the db before starting
 }
 
 var boltMap = make(map[string]*Persistent)
@@ -54,9 +55,9 @@ func GetPersistent(dbPath string, f *Features) (*Persistent, error) {
 }
 
 type chunkInfo struct {
-	Path			string
-	Offset		int64
-	Size			int64
+	Path   string
+	Offset int64
+	Size   int64
 }
 
 // Persistent is a wrapper of persistent storage for a bolt.DB file
@@ -67,7 +68,7 @@ type Persistent struct {
 	dataPath   string
 	db         *bolt.DB
 	cleanupMux sync.Mutex
-	features	 *Features
+	features   *Features
 }
 
 // newPersistent builds a new wrapper and connects to the bolt.DB file
@@ -77,7 +78,7 @@ func newPersistent(dbPath string, f *Features) (*Persistent, error) {
 	b := &Persistent{
 		dbPath:   dbPath,
 		dataPath: dataPath,
-		features:	f,
+		features: f,
 	}
 
 	err := b.Connect()
@@ -525,7 +526,7 @@ func (b *Persistent) CleanChunksBySize(maxSize int64) {
 				}
 				err = os.Remove(path.Join(b.dataPath, ci.Path, strconv.FormatInt(ci.Offset, 10)))
 				if err == nil {
-					cntChunks += 1
+					cntChunks++
 					needToClean -= ci.Size
 					if needToClean <= 0 {
 						break
@@ -631,7 +632,7 @@ func (b *Persistent) Stats() (map[string]map[string]interface{}, error) {
 			if err != nil {
 				continue
 			}
-			totalChunks += 1
+			totalChunks++
 			totalSize += ci.Size
 		}
 		r["data"]["total-chunks"] = totalChunks

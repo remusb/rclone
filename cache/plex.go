@@ -2,39 +2,39 @@
 
 package cache
 
-import(
-	"github.com/ncw/rclone/fs"
+import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
-	"fmt"
-	"encoding/json"
 	"strings"
-	"github.com/pkg/errors"
 	"time"
+
+	"github.com/ncw/rclone/fs"
 )
 
 const (
-	// defPlexLoginUrl is the default URL for Plex login
-	defPlexLoginUrl = "https://plex.tv/users/sign_in.json"
+	// defPlexLoginURL is the default URL for Plex login
+	defPlexLoginURL = "https://plex.tv/users/sign_in.json"
 )
 
 // plexConnector is managing the cache integration with Plex
 type plexConnector struct {
-	url	*url.URL
+	url   *url.URL
 	token string
-	f		*Fs
+	f     *Fs
 }
 
 // newPlexConnector connects to a Plex server and generates a token
-func newPlexConnector(f *Fs, plexUrl, username, password string) (*plexConnector, error) {
-	u, err := url.ParseRequestURI(strings.TrimRight(plexUrl, "/"))
+func newPlexConnector(f *Fs, plexURL, username, password string) (*plexConnector, error) {
+	u, err := url.ParseRequestURI(strings.TrimRight(plexURL, "/"))
 	if err != nil {
 		return nil, err
 	}
 
 	pc := &plexConnector{
-		f: f,
-		url: u,
+		f:     f,
+		url:   u,
 		token: "",
 	}
 
@@ -47,15 +47,15 @@ func newPlexConnector(f *Fs, plexUrl, username, password string) (*plexConnector
 }
 
 // newPlexConnector connects to a Plex server and generates a token
-func newPlexConnectorWithToken(f *Fs, plexUrl, token string) (*plexConnector, error) {
-	u, err := url.ParseRequestURI(strings.TrimRight(plexUrl, "/"))
+func newPlexConnectorWithToken(f *Fs, plexURL, token string) (*plexConnector, error) {
+	u, err := url.ParseRequestURI(strings.TrimRight(plexURL, "/"))
 	if err != nil {
 		return nil, err
 	}
 
 	pc := &plexConnector{
-		f: f,
-		url: u,
+		f:     f,
+		url:   u,
 		token: token,
 	}
 
@@ -78,7 +78,7 @@ func (p *plexConnector) authenticate(username, password string) error {
 	form := url.Values{}
 	form.Set("user[login]", username)
 	form.Add("user[password]", password)
-	req, err := http.NewRequest("POST", defPlexLoginUrl, strings.NewReader(form.Encode()))
+	req, err := http.NewRequest("POST", defPlexLoginURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -88,14 +88,17 @@ func (p *plexConnector) authenticate(username, password string) error {
 		return err
 	}
 	var data map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&data)
+	err = json.NewDecoder(resp.Body).Decode(&data)
+	if err != nil {
+		return fmt.Errorf("failed to obtain token: %v", err)
+	}
 	tokenGen, ok := get(data, "user", "authToken")
 	if !ok {
-		return errors.New("failed to parse token")
+		return fmt.Errorf("failed to obtain token: %v", data)
 	}
 	token, ok := tokenGen.(string)
 	if !ok {
-		return errors.New("failed to parse token")
+		return fmt.Errorf("failed to obtain token: %v", data)
 	}
 	p.token = token
 
@@ -122,12 +125,10 @@ func (p *plexConnector) isPlaying(co *Object) bool {
 	json.NewDecoder(resp.Body).Decode(&data)
 	sizeGen, ok := get(data, "MediaContainer", "size")
 	if !ok {
-		fs.Errorf("plex", "empty container: %v", data)
 		return false
 	}
 	size, ok := sizeGen.(float64)
 	if !ok || size < float64(1) {
-		fs.Errorf("plex", "empty container: %v", data)
 		return false
 	}
 	videosGen, ok := get(data, "MediaContainer", "Video")
@@ -181,7 +182,6 @@ func (p *plexConnector) isPlaying(co *Object) bool {
 			fs.Errorf("plex", "failed to understand: %v", fp)
 			continue
 		}
-		fs.Errorf("plex", "searching %v in %v", remote, fp)
 		if strings.Contains(fp, remote) {
 			isPlaying = true
 			break
@@ -192,12 +192,12 @@ func (p *plexConnector) isPlaying(co *Object) bool {
 }
 
 func (p *plexConnector) isPlayingAsync(co *Object, response chan bool) {
-	time.Sleep(time.Second * 3) // FIXME random guess here
+	time.Sleep(time.Second) // FIXME random guess here
 	res := p.isPlaying(co)
 	response <- res
 }
 
-// credit: https://stackoverflow.com/a/28878037
+// adapted from: https://stackoverflow.com/a/28878037 (credit)
 func get(m interface{}, path ...interface{}) (interface{}, bool) {
 	for _, p := range path {
 		switch idx := p.(type) {

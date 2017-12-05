@@ -7,7 +7,6 @@ import (
 	"io"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,11 +16,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/ncw/rclone/crypt"
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
-	"golang.org/x/net/context"
-	"golang.org/x/time/rate"
-	"github.com/ncw/rclone/crypt"
 )
 
 const (
@@ -34,15 +31,11 @@ const (
 	// DefCacheInfoAge is the default value for object info age
 	DefCacheInfoAge = "6h"
 	// DefCacheReadRetries is the default value for read retries
-	DefCacheReadRetries = 3
+	DefCacheReadRetries = 10
 	// DefCacheTotalWorkers is how many workers run in parallel to download chunks
 	DefCacheTotalWorkers = 4
 	// DefCacheChunkNoMemory will enable or disable in-memory storage for chunks
 	DefCacheChunkNoMemory = false
-	// DefCacheRps limits the number of requests per second to the source FS
-	DefCacheRps = -1
-	// DefWarmUpRatePerSeconds will apply a special config for warming up the cache
-	DefWarmUpRatePerSeconds = "3/20"
 	// DefCacheWrites will cache file data on writes through the cache
 	DefCacheWrites = false
 )
@@ -50,18 +43,16 @@ const (
 // Globals
 var (
 	// Flags
-	cacheDbPath        = fs.StringP("cache-db-path", "", filepath.Join(fs.CacheDir, "cache-backend"), "Directory to cache DB")
-	cacheDbPurge       = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
-	cacheChunkSize     = fs.StringP("cache-chunk-size", "", DefCacheChunkSize, "The size of a chunk")
-	cacheTotalChunkSize	= fs.StringP("cache-total-chunk-size", "", DefCacheTotalChunkSize, "The size of a chunk")
-	cacheChunkCleanInterval       = fs.StringP("cache-chunk-clean-interval", "", DefCacheChunkCleanInterval, "Interval at which chunk cleanup runs")
-	cacheInfoAge       = fs.StringP("cache-info-age", "", DefCacheInfoAge, "How much time should object info be stored in cache")
-	cacheReadRetries   = fs.IntP("cache-read-retries", "", DefCacheReadRetries, "How many times to retry a read from a cache storage")
-	cacheTotalWorkers  = fs.IntP("cache-workers", "", DefCacheTotalWorkers, "How many workers should run in parallel to download chunks")
-	cacheChunkNoMemory = fs.BoolP("cache-chunk-no-memory", "", DefCacheChunkNoMemory, "Disable the in-memory cache for storing chunks during streaming")
-	cacheRps           = fs.IntP("cache-rps", "", int(DefCacheRps), "Limits the number of requests per second to the source FS. -1 disables the rate limiter")
-	cacheWarmUp        = fs.StringP("cache-warm-up-rps", "", DefWarmUpRatePerSeconds, "Format is X/Y = how many X opens per Y seconds should trigger the warm up mode. See the docs")
-	cacheStoreWrites   = fs.BoolP("cache-writes", "", DefCacheWrites, "Will cache file data on writes through the FS")
+	cacheDbPath             = fs.StringP("cache-db-path", "", filepath.Join(fs.CacheDir, "cache-backend"), "Directory to cache DB")
+	cacheDbPurge            = fs.BoolP("cache-db-purge", "", false, "Purge the cache DB before")
+	cacheChunkSize          = fs.StringP("cache-chunk-size", "", DefCacheChunkSize, "The size of a chunk")
+	cacheTotalChunkSize     = fs.StringP("cache-total-chunk-size", "", DefCacheTotalChunkSize, "The total size which the chunks can take up from the disk")
+	cacheChunkCleanInterval = fs.StringP("cache-chunk-clean-interval", "", DefCacheChunkCleanInterval, "Interval at which chunk cleanup runs")
+	cacheInfoAge            = fs.StringP("cache-info-age", "", DefCacheInfoAge, "How much time should object info be stored in cache")
+	cacheReadRetries        = fs.IntP("cache-read-retries", "", DefCacheReadRetries, "How many times to retry a read from a cache storage")
+	cacheTotalWorkers       = fs.IntP("cache-workers", "", DefCacheTotalWorkers, "How many workers should run in parallel to download chunks")
+	cacheChunkNoMemory      = fs.BoolP("cache-chunk-no-memory", "", DefCacheChunkNoMemory, "Disable the in-memory cache for storing chunks during streaming")
+	cacheStoreWrites        = fs.BoolP("cache-writes", "", DefCacheWrites, "Will cache file data on writes through the FS")
 )
 
 // Register with Fs
@@ -74,18 +65,18 @@ func init() {
 			Name: "remote",
 			Help: "Remote to cache.\nNormally should contain a ':' and a path, eg \"myremote:path/to/dir\",\n\"myremote:bucket\" or maybe \"myremote:\" (not recommended).",
 		}, {
-			Name: "plex_url",
-			Help: "Optional: The URL of the Plex server",
+			Name:     "plex_url",
+			Help:     "Optional: The URL of the Plex server",
 			Optional: true,
 		}, {
-			Name: "plex_username",
-			Help: "Optional: The username of the Plex user",
+			Name:     "plex_username",
+			Help:     "Optional: The username of the Plex user",
 			Optional: true,
 		}, {
-			Name: "plex_password",
-			Help: "Optional: The password of the Plex user",
+			Name:       "plex_password",
+			Help:       "Optional: The password of the Plex user",
 			IsPassword: true,
-			Optional: true,
+			Optional:   true,
 		}, {
 			Name: "chunk_size",
 			Help: "The size of a chunk. Lower value good for slow connections but can affect seamless reading. \nDefault: " + DefCacheChunkSize,
@@ -212,28 +203,20 @@ type Fs struct {
 	features *fs.Features // optional features
 	cache    Storage
 
-	fileAge              time.Duration
-	chunkSize            int64
-	chunkTotalSize			 int64
-	chunkCleanInterval	 time.Duration
-	readRetries          int
-	totalWorkers         int
-	chunkMemory          bool
-	warmUp               bool
-	warmUpRate           int
-	warmUpSec            int
-	cacheWrites          bool
-	originalTotalWorkers int
-	originalChunkMemory  bool
-	totalMaxWorkers			 int
+	fileAge            time.Duration
+	chunkSize          int64
+	chunkTotalSize     int64
+	chunkCleanInterval time.Duration
+	readRetries        int
+	totalWorkers       int
+	totalMaxWorkers    int
+	chunkMemory        bool
+	cacheWrites        bool
 
-	lastChunkCleanup  time.Time
-	lastRootCleanup   time.Time
-	lastOpenedEntries map[string]time.Time
-	cleanupMu         sync.Mutex
-	warmupMu          sync.Mutex
-	rateLimiter       *rate.Limiter
-	plexConnector			*plexConnector
+	lastChunkCleanup time.Time
+	lastRootCleanup  time.Time
+	cleanupMu        sync.Mutex
+	plexConnector    *plexConnector
 }
 
 // NewFs contstructs an Fs from the path, container:path
@@ -252,9 +235,8 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	}
 	fs.Debugf(name, "wrapped %v:%v at root %v", wrappedFs.Name(), wrappedFs.Root(), rpath)
 
-	plex_url := fs.ConfigFileGet(name, "plex_url")
-	plex_token := fs.ConfigFileGet(name, "plex_token")
-
+	plexURL := fs.ConfigFileGet(name, "plex_url")
+	plexToken := fs.ConfigFileGet(name, "plex_token")
 	var chunkSize fs.SizeSuffix
 	chunkSizeString := fs.ConfigFileGet(name, "chunk_size", DefCacheChunkSize)
 	if *cacheChunkSize != DefCacheChunkSize {
@@ -286,64 +268,48 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to understand duration", infoAge)
 	}
-	warmupRps := strings.Split(*cacheWarmUp, "/")
-	warmupRate, err := strconv.Atoi(warmupRps[0])
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to understand warm up rate", *cacheWarmUp)
-	}
-	warmupSec, err := strconv.Atoi(warmupRps[1])
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to understand warm up seconds", *cacheWarmUp)
-	}
 	// configure cache backend
 	if *cacheDbPurge {
 		fs.Debugf(name, "Purging the DB")
 	}
 	f := &Fs{
-		Fs:                   wrappedFs,
-		name:                 name,
-		root:                 rpath,
-		fileAge:              infoDuration,
-		chunkSize:            int64(chunkSize),
-		chunkTotalSize:				int64(chunkTotalSize),
-		chunkCleanInterval:		chunkCleanInterval,
-		readRetries:          *cacheReadRetries,
-		totalWorkers:         *cacheTotalWorkers,
-		originalTotalWorkers: *cacheTotalWorkers,
-		totalMaxWorkers:			*cacheTotalWorkers,
-		chunkMemory:          !*cacheChunkNoMemory,
-		originalChunkMemory:  !*cacheChunkNoMemory,
-		warmUp:               false,
-		warmUpRate:           warmupRate,
-		warmUpSec:            warmupSec,
-		cacheWrites:          *cacheStoreWrites,
-		lastChunkCleanup:     time.Now().Truncate(time.Hour * 24 * 30),
-		lastRootCleanup:      time.Now().Truncate(time.Hour * 24 * 30),
-		lastOpenedEntries:    make(map[string]time.Time),
+		Fs:                 wrappedFs,
+		name:               name,
+		root:               rpath,
+		fileAge:            infoDuration,
+		chunkSize:          int64(chunkSize),
+		chunkTotalSize:     int64(chunkTotalSize),
+		chunkCleanInterval: chunkCleanInterval,
+		readRetries:        *cacheReadRetries,
+		totalWorkers:       *cacheTotalWorkers,
+		totalMaxWorkers:    *cacheTotalWorkers,
+		chunkMemory:        !*cacheChunkNoMemory,
+		cacheWrites:        *cacheStoreWrites,
+		lastChunkCleanup:   time.Now().Truncate(time.Hour * 24 * 30),
+		lastRootCleanup:    time.Now().Truncate(time.Hour * 24 * 30),
 	}
-	f.rateLimiter = rate.NewLimiter(rate.Limit(float64(*cacheRps)), f.totalWorkers)
 
 	f.plexConnector = &plexConnector{}
-	if plex_url != "" {
+	if plexURL != "" {
 		usingPlex := false
 
-		if plex_token != "" {
-			f.plexConnector, err = newPlexConnectorWithToken(f, plex_url, plex_token)
+		if plexToken != "" {
+			f.plexConnector, err = newPlexConnectorWithToken(f, plexURL, plexToken)
 			if err != nil {
-				return nil, errors.Wrapf(err, "failed to connect to the Plex API %v", plex_url)
+				return nil, errors.Wrapf(err, "failed to connect to the Plex API %v", plexURL)
 			}
 			usingPlex = true
 		} else {
-			plex_username := fs.ConfigFileGet(name, "plex_username")
-			plex_password := fs.ConfigFileGet(name, "plex_password")
-			if plex_password != "" && plex_username != "" {
-				dec_pass, err := fs.Reveal(plex_password)
+			plexUsername := fs.ConfigFileGet(name, "plex_username")
+			plexPassword := fs.ConfigFileGet(name, "plex_password")
+			if plexPassword != "" && plexUsername != "" {
+				decPass, err := fs.Reveal(plexPassword)
 				if err != nil {
-					dec_pass = plex_password
+					decPass = plexPassword
 				}
-				f.plexConnector, err = newPlexConnector(f, plex_url, plex_username, dec_pass)
+				f.plexConnector, err = newPlexConnector(f, plexURL, plexUsername, decPass)
 				if err != nil {
-					return nil, errors.Wrapf(err, "failed to connect to the Plex API %v", plex_url)
+					return nil, errors.Wrapf(err, "failed to connect to the Plex API %v", plexURL)
 				}
 				if f.plexConnector.token != "" {
 					fs.ConfigFileSet(name, "plex_token", f.plexConnector.token)
@@ -354,7 +320,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		}
 
 		if usingPlex {
-			fs.Infof(name, "Connected to Plex server: %v", plex_url)
+			fs.Infof(name, "Connected to Plex server: %v", plexURL)
 			// when connected to a Plex server we default to 1 worker (Plex scans all the time)
 			// and leave max workers as a setting to scale out the workers on demand during playback
 			f.totalWorkers = 1
@@ -373,7 +339,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	dbPath = filepath.Join(dbPath, name+".db")
 	fs.Infof(name, "Storage DB path: %v", dbPath)
 	f.cache, err = GetPersistent(dbPath, &Features{
-		PurgeDb:							*cacheDbPurge,
+		PurgeDb: *cacheDbPurge,
 	})
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to start cache db")
@@ -454,35 +420,6 @@ func (f *Fs) String() string {
 // ChunkSize returns the configured chunk size
 func (f *Fs) ChunkSize() int64 {
 	return f.chunkSize
-}
-
-// originalSettingWorkers will return the original value of this config
-func (f *Fs) originalSettingWorkers() int {
-	return f.originalTotalWorkers
-}
-
-// originalSettingChunkMemory will return the original value of this config
-func (f *Fs) originalSettingChunkMemory() bool {
-	return f.originalChunkMemory
-}
-
-// InWarmUp says if cache warm up is active
-func (f *Fs) InWarmUp() bool {
-	return f.warmUp
-}
-
-// enableWarmUp will enable the warm up state of this cache along with the relevant settings
-func (f *Fs) enableWarmUp() {
-	f.totalWorkers = 1
-	f.chunkMemory = false
-	f.warmUp = true
-}
-
-// disableWarmUp will disable the warm up state of this cache along with the relevant settings
-func (f *Fs) disableWarmUp() {
-	f.totalWorkers = f.originalSettingWorkers()
-	f.chunkMemory = f.originalSettingChunkMemory()
-	f.warmUp = false
 }
 
 // NewObject finds the Object at remote.
@@ -884,10 +821,6 @@ func (f *Fs) Purge() error {
 	fs.Infof(f, "purging cache")
 	f.cache.Purge()
 
-	f.warmupMu.Lock()
-	defer f.warmupMu.Unlock()
-	f.lastOpenedEntries = make(map[string]time.Time)
-
 	do := f.Fs.Features().Purge
 	if do == nil {
 		return nil
@@ -916,50 +849,6 @@ func (f *Fs) CleanUp() error {
 // Stats returns stats about the cache storage
 func (f *Fs) Stats() (map[string]map[string]interface{}, error) {
 	return f.cache.Stats()
-}
-
-// OpenRateLimited will execute a closure under a rate limiter watch
-func (f *Fs) OpenRateLimited(fn func() (io.ReadCloser, error)) (io.ReadCloser, error) {
-	var err error
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-	defer cancel()
-	start := time.Now()
-
-	if err = f.rateLimiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-
-	elapsed := time.Since(start)
-	if elapsed > time.Second*2 {
-		fs.Debugf(f, "rate limited: %s", elapsed)
-	}
-	return fn()
-}
-
-// CheckIfWarmupNeeded changes the FS settings during warmups
-func (f *Fs) CheckIfWarmupNeeded(remote string) {
-	f.warmupMu.Lock()
-	defer f.warmupMu.Unlock()
-
-	//secondCount := time.Duration(f.warmUpSec)
-	//rate := f.warmUpRate
-	//
-	//// clean up entries older than the needed time frame needed
-	//for k, v := range f.lastOpenedEntries {
-	//	if time.Now().After(v.Add(time.Second * secondCount)) {
-	//		delete(f.lastOpenedEntries, k)
-	//	}
-	//}
-	//f.lastOpenedEntries[remote] = time.Now()
-
-	// simple check for the current load
-	//if len(f.lastOpenedEntries) >= rate && !f.warmUp {
-	//	fs.Infof(f, "turning on cache warmup")
-	//	f.enableWarmUp()
-	//} else if len(f.lastOpenedEntries) < rate && f.warmUp {
-	//	fs.Infof(f, "turning off cache warmup")
-	//	f.disableWarmUp()
-	//}
 }
 
 // CleanUpCache will cleanup only the cache data that is expired
@@ -993,7 +882,6 @@ func (f *Fs) WrapFs() fs.Fs {
 // SetWrapper sets the Fs that is wrapping this Fs
 func (f *Fs) SetWrapper(wrapper fs.Fs) {
 	f.wrapper = wrapper
-	fs.Errorf(f, "setting wrapper %v: %T", f.wrapper.String(), f.wrapper)
 }
 
 // Wrap returns the Fs that is wrapping this Fs

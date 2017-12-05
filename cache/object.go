@@ -205,7 +205,6 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 	if err := o.refreshFromSource(); err != nil {
 		return nil, err
 	}
-	o.CacheFs.CheckIfWarmupNeeded(o.Remote())
 
 	cacheReader := NewObjectHandle(o)
 	for _, option := range options {
