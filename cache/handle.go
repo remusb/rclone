@@ -343,7 +343,9 @@ func (w *worker) reader(offset, end int64) (io.ReadCloser, error) {
 	var err error
 	r := w.rc
 	if w.rc == nil {
-		r, err = w.r.cachedObject.Object.Open(&fs.RangeOption{Start: offset, End: end}, &fs.SeekOption{Offset: offset})
+		r, err = w.r.cacheFs().OpenRateLimited(func() (io.ReadCloser, error) {
+			return w.r.cachedObject.Object.Open(&fs.RangeOption{Start: offset, End: end}, &fs.SeekOption{Offset: offset})
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -357,7 +359,13 @@ func (w *worker) reader(offset, end int64) (io.ReadCloser, error) {
 	}
 
 	_ = w.rc.Close()
-	return w.r.cachedObject.Object.Open(&fs.RangeOption{Start: offset, End: end}, &fs.SeekOption{Offset: offset})
+	return w.r.cacheFs().OpenRateLimited(func() (io.ReadCloser, error) {
+		r, err = w.r.cachedObject.Object.Open(&fs.RangeOption{Start: offset, End: end}, &fs.SeekOption{Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		return r, nil
+	})
 }
 
 func (w *worker) isRunning() bool {

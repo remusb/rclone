@@ -19,6 +19,8 @@ import (
 	"github.com/ncw/rclone/crypt"
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
+	"golang.org/x/net/context"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -36,6 +38,8 @@ const (
 	DefCacheTotalWorkers = 4
 	// DefCacheChunkNoMemory will enable or disable in-memory storage for chunks
 	DefCacheChunkNoMemory = false
+	// DefCacheRps limits the number of requests per second to the source FS
+	DefCacheRps = -1
 	// DefCacheWrites will cache file data on writes through the cache
 	DefCacheWrites = false
 )
@@ -52,6 +56,7 @@ var (
 	cacheReadRetries        = fs.IntP("cache-read-retries", "", DefCacheReadRetries, "How many times to retry a read from a cache storage")
 	cacheTotalWorkers       = fs.IntP("cache-workers", "", DefCacheTotalWorkers, "How many workers should run in parallel to download chunks")
 	cacheChunkNoMemory      = fs.BoolP("cache-chunk-no-memory", "", DefCacheChunkNoMemory, "Disable the in-memory cache for storing chunks during streaming")
+	cacheRps                = fs.IntP("cache-rps", "", int(DefCacheRps), "Limits the number of requests per second to the source FS. -1 disables the rate limiter")
 	cacheStoreWrites        = fs.BoolP("cache-writes", "", DefCacheWrites, "Will cache file data on writes through the FS")
 )
 
@@ -216,6 +221,7 @@ type Fs struct {
 	lastChunkCleanup time.Time
 	lastRootCleanup  time.Time
 	cleanupMu        sync.Mutex
+	rateLimiter      *rate.Limiter
 	plexConnector    *plexConnector
 }
 
@@ -288,6 +294,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		lastChunkCleanup:   time.Now().Truncate(time.Hour * 24 * 30),
 		lastRootCleanup:    time.Now().Truncate(time.Hour * 24 * 30),
 	}
+	f.rateLimiter = rate.NewLimiter(rate.Limit(float64(*cacheRps)), f.totalWorkers)
 
 	f.plexConnector = &plexConnector{}
 	if plexURL != "" {
@@ -849,6 +856,24 @@ func (f *Fs) CleanUp() error {
 // Stats returns stats about the cache storage
 func (f *Fs) Stats() (map[string]map[string]interface{}, error) {
 	return f.cache.Stats()
+}
+
+// OpenRateLimited will execute a closure under a rate limiter watch
+func (f *Fs) OpenRateLimited(fn func() (io.ReadCloser, error)) (io.ReadCloser, error) {
+	var err error
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+	start := time.Now()
+
+	if err = f.rateLimiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > time.Second*2 {
+		fs.Debugf(f, "rate limited: %s", elapsed)
+	}
+	return fn()
 }
 
 // CleanUpCache will cleanup only the cache data that is expired
