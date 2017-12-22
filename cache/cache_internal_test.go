@@ -8,21 +8,15 @@ import (
 	"io"
 	"io/ioutil"
 	"math/rand"
+	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	//"os"
-	"os/exec"
-	//"strings"
-
 	"github.com/ncw/rclone/cache"
-	//"github.com/ncw/rclone/cmd/mount"
-	//_ "github.com/ncw/rclone/cmd/cmount"
-	//"github.com/ncw/rclone/cmd/mountlib"
 	_ "github.com/ncw/rclone/drive"
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fstest"
@@ -32,42 +26,64 @@ import (
 )
 
 var (
-	infoAge    = time.Second * 10
-	chunkClean = time.Second
+	remoteName = flag.String("remote-internal", "TestCache", "Remote to test with, defaults to local filesystem")
 	okDiff     = time.Second * 9 // really big diff here but the build machines seem to be slow. need a different way for this
-	workers    = 2
+	allCfgMap  = map[string]string{
+		"plex_url":         "",
+		"plex_username":    "",
+		"plex_password":    "",
+		"chunk_size":       cache.DefCacheChunkSize,
+		"info_age":         cache.DefCacheInfoAge,
+		"chunk_total_size": cache.DefCacheTotalChunkSize,
+	}
+	allFlagMap = map[string]string{
+		"cache-db-path":              filepath.Join(fs.CacheDir, "cache-backend"),
+		"cache-chunk-path":           filepath.Join(fs.CacheDir, "cache-backend"),
+		"cache-db-purge":             "true",
+		"cache-chunk-size":           cache.DefCacheChunkSize,
+		"cache-total-chunk-size":     cache.DefCacheTotalChunkSize,
+		"cache-chunk-clean-interval": cache.DefCacheChunkCleanInterval,
+		"cache-info-age":             cache.DefCacheInfoAge,
+		"cache-read-retries":         strconv.Itoa(cache.DefCacheReadRetries),
+		"cache-workers":              strconv.Itoa(cache.DefCacheTotalWorkers),
+		"cache-chunk-no-memory":      "false",
+		"cache-rps":                  strconv.Itoa(cache.DefCacheRps),
+		"cache-writes":               "false",
+		"cache-tmp-upload-path":      "",
+		"cache-tmp-wait-time":        "0s",
+	}
 )
 
 func TestInternalListRootAndInnerRemotes(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "tilrair-local", "tilrair-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "tilrair", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	// Instantiate inner fs
 	innerFolder := "inner"
 	err := rootFs.Mkdir(innerFolder)
 	require.NoError(t, err)
-	innerFs, err := fs.NewFs("tilrair-cache:" + innerFolder)
-	require.NoError(t, err)
+	rootFs2, boltDb2 := newCacheFs(t, *remoteName, "tilrair/"+innerFolder, true, nil, nil)
+	defer cleanupFs(t, rootFs2, boltDb2)
 
-	obj := writeObjectString(t, innerFs, "one", "content")
+	obj := writeObjectString(t, rootFs2, "one", "content")
 
 	listRoot, err := rootFs.List("")
 	require.NoError(t, err)
 	listRootInner, err := rootFs.List(innerFolder)
 	require.NoError(t, err)
-	listInner, err := innerFs.List("")
+	listInner, err := rootFs2.List("")
 	require.NoError(t, err)
 
 	require.Lenf(t, listRoot, 1, "remote %v should have 1 entry", rootFs.Root())
 	require.Lenf(t, listRootInner, 1, "remote %v should have 1 entry in %v", rootFs.Root(), innerFolder)
-	require.Lenf(t, listInner, 1, "remote %v should have 1 entry", innerFs.Root())
+	require.Lenf(t, listInner, 1, "remote %v should have 1 entry", rootFs2.Root())
 
 	err = obj.Remove()
 	require.NoError(t, err)
 }
 
 func TestInternalObjWrapFsFound(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "tiowff-local", "tiowff-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "tiowff", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -101,7 +117,7 @@ func TestInternalObjWrapFsFound(t *testing.T) {
 }
 
 func TestInternalObjNotFound(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "tionf-local", "tionf-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "tionf", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	obj, err := rootFs.NewObject("404")
@@ -110,7 +126,7 @@ func TestInternalObjNotFound(t *testing.T) {
 }
 
 func TestInternalCachedWrittenContentMatches(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "ticwcm-local", "ticwcm-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "ticwcm", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -137,7 +153,7 @@ func TestInternalCachedWrittenContentMatches(t *testing.T) {
 }
 
 func TestInternalCachedUpdatedContentMatches(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "ticucm-local", "ticucm-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "ticucm", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	// create some rand test data
@@ -158,7 +174,7 @@ func TestInternalCachedUpdatedContentMatches(t *testing.T) {
 }
 
 func TestInternalWrappedWrittenContentMatches(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "tiwwcm-local", "tiwwcm-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "tiwwcm", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -193,7 +209,7 @@ func TestInternalWrappedWrittenContentMatches(t *testing.T) {
 
 func TestInternalLargeWrittenContentMatches(t *testing.T) {
 	t.Skip("FIXME disabled because it is unreliable")
-	rootFs, boltDb := newLocalCacheFs(t, "tilwcm-local", "tilwcm-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "tilwcm", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -224,7 +240,7 @@ func TestInternalLargeWrittenContentMatches(t *testing.T) {
 }
 
 func TestInternalLargeWrittenContentMatches2(t *testing.T) {
-	cryptFs, boltDb := newLocalCacheCryptFs(t, "tilwcm2-local", "tilwcm2-cache", "tilwcm2-crypt", true, nil)
+	cryptFs, boltDb := newCacheFs(t, *remoteName, "tilwcm2", true, nil, nil)
 	defer cleanupFs(t, cryptFs, boltDb)
 
 	cfs, err := getCacheFs(cryptFs)
@@ -266,7 +282,7 @@ func TestInternalLargeWrittenContentMatches2(t *testing.T) {
 }
 
 func TestInternalWrappedFsChangeNotSeen(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "tiwfcns-local", "tiwfcns-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "tiwfcns", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -274,7 +290,7 @@ func TestInternalWrappedFsChangeNotSeen(t *testing.T) {
 	chunkSize := cfs.ChunkSize()
 
 	// create some rand test data
-	co := writeObjectRandomBytes(t, rootFs, (chunkSize*4 + chunkSize/2))
+	co := writeObjectRandomBytes(t, rootFs, "", (chunkSize*4 + chunkSize/2))
 
 	// update in the wrapped fs
 	o, err := cfs.UnWrap().NewObject(co.Remote())
@@ -292,7 +308,7 @@ func TestInternalWrappedFsChangeNotSeen(t *testing.T) {
 }
 
 func TestInternalChangeSeenAfterDirCacheFlush(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "ticsadcf-local", "ticsadcf-cache", nil)
+	rootFs, boltDb := newCacheFs(t, *remoteName, "ticsadcf", true, nil, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -300,7 +316,7 @@ func TestInternalChangeSeenAfterDirCacheFlush(t *testing.T) {
 	chunkSize := cfs.ChunkSize()
 
 	// create some rand test data
-	co := writeObjectRandomBytes(t, rootFs, (chunkSize*4 + chunkSize/2))
+	co := writeObjectRandomBytes(t, rootFs, "", (chunkSize*4 + chunkSize/2))
 
 	// update in the wrapped fs
 	o, err := cfs.UnWrap().NewObject(co.Remote())
@@ -330,7 +346,7 @@ func TestInternalChangeSeenAfterDirCacheFlush(t *testing.T) {
 }
 
 func TestInternalCacheWrites(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "ticw-local", "ticw-cache", map[string]string{"cache-writes": "true"})
+	rootFs, boltDb := newCacheFs(t, *remoteName, "ticw", true, nil, map[string]string{"cache-writes": "true"})
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -338,7 +354,7 @@ func TestInternalCacheWrites(t *testing.T) {
 	chunkSize := cfs.ChunkSize()
 
 	// create some rand test data
-	co := writeObjectRandomBytes(t, rootFs, (chunkSize*4 + chunkSize/2))
+	co := writeObjectRandomBytes(t, rootFs, "", (chunkSize*4 + chunkSize/2))
 	expectedTs := time.Now()
 	ts, err := boltDb.GetChunkTs(path.Join(rootFs.Root(), co.Remote()), 0)
 	require.NoError(t, err)
@@ -346,7 +362,7 @@ func TestInternalCacheWrites(t *testing.T) {
 }
 
 func TestInternalMaxChunkSizeRespected(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "timcsr-local", "timcsr-cache", map[string]string{"cache-workers": "1"})
+	rootFs, boltDb := newCacheFs(t, *remoteName, "timcsr", true, nil, map[string]string{"cache-workers": "1"})
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -355,7 +371,7 @@ func TestInternalMaxChunkSizeRespected(t *testing.T) {
 	totalChunks := 20
 
 	// create some rand test data
-	obj := writeObjectRandomBytes(t, cfs, (int64(totalChunks-1)*chunkSize + chunkSize/2))
+	obj := writeObjectRandomBytes(t, cfs, "", (int64(totalChunks-1)*chunkSize + chunkSize/2))
 	o, err := rootFs.NewObject(obj.Remote())
 	require.NoError(t, err)
 	co, ok := o.(*cache.Object)
@@ -379,7 +395,7 @@ func TestInternalMaxChunkSizeRespected(t *testing.T) {
 }
 
 func TestInternalExpiredEntriesRemoved(t *testing.T) {
-	rootFs, boltDb := newLocalCacheFs(t, "tieer-local", "tieer-cache", map[string]string{"info_age": "5s"})
+	rootFs, boltDb := newCacheFs(t, *remoteName, "tieer", true, map[string]string{"info_age": "5s"}, nil)
 	defer cleanupFs(t, rootFs, boltDb)
 
 	cfs, err := getCacheFs(rootFs)
@@ -418,7 +434,7 @@ func TestInternalExpiredEntriesRemoved(t *testing.T) {
 //		t.Skip("Not yet")
 //	}
 //	id := "tifm1904"
-//	rootFs, _ := newLocalCacheCryptFs(t, "test-local", "test-cache", "test-crypt", false,
+//	rootFs, _ := newCacheFs(t, *remoteName, id, false,
 //		map[string]string{"chunk_size": "5M", "info_age": "1m", "chunk_total_size": "500M", "cache-writes": "true"})
 //	mntPoint := path.Join("/tmp", "tifm1904-mnt")
 //	testPoint := path.Join(mntPoint, id)
@@ -470,8 +486,352 @@ func TestInternalExpiredEntriesRemoved(t *testing.T) {
 //	}
 //}
 
-func writeObjectRandomBytes(t *testing.T, f fs.Fs, size int64) fs.Object {
-	remote := strconv.Itoa(rand.Int()) + ".bin"
+func TestUploadTempDirCreated(t *testing.T) {
+	id := "tutdc"
+	_ = os.RemoveAll(path.Join("/tmp", id))
+	rootFs, boltDb := newCacheFs(t, *remoteName, id, true,
+		map[string]string{"chunk_size": "5M", "info_age": "60m", "chunk_total_size": "500M"},
+		map[string]string{"cache-tmp-upload-path": path.Join("/tmp", id)})
+	defer cleanupFs(t, rootFs, boltDb)
+
+	_, err := os.Stat(path.Join("/tmp", id))
+	require.NoError(t, err)
+}
+
+func TestUploadQueue(t *testing.T) {
+	id := "tuq"
+	_ = os.RemoveAll(path.Join("/tmp", id))
+	rootFs, boltDb := newCacheFs(t, *remoteName, id, true,
+		map[string]string{"chunk_size": "5M", "info_age": "60m", "chunk_total_size": "500M"},
+		map[string]string{"cache-tmp-upload-path": path.Join("/tmp", id)})
+	defer cleanupFs(t, rootFs, boltDb)
+
+	_, err := getCacheFs(rootFs)
+	require.NoError(t, err)
+
+	// create some rand test data
+	_ = writeObjectString(t, rootFs, "one", "one content")
+
+	// check if it can be read
+	obj1, err := rootFs.NewObject("one")
+	require.NoError(t, err)
+	data1 := readDataFromObj(t, obj1, 0, int64(len([]byte("one content"))), false)
+	require.Equal(t, []byte("one content"), data1)
+	// validate that it exists in temp fs
+	_, err = os.Stat(path.Join("/tmp", id, "one"))
+	require.NoError(t, err)
+
+	// wait for background uploader to do its thing
+	time.Sleep(time.Second * 2)
+
+	// check if it was removed from temp fs
+	_, err = os.Stat(path.Join("/tmp", id, "one"))
+	require.True(t, os.IsNotExist(err))
+	// check if it can be read
+	obj2, err := rootFs.NewObject("one")
+	require.NoError(t, err)
+	data2 := readDataFromObj(t, obj2, 0, int64(len([]byte("one content"))), false)
+	require.Equal(t, []byte("one content"), data2)
+}
+
+func TestUploadQueueMoreFiles(t *testing.T) {
+	id := "tuqmf"
+	_ = os.RemoveAll(path.Join("/tmp", id))
+	rootFs, boltDb := newCacheFs(t, *remoteName, id, true,
+		map[string]string{"chunk_size": "5M", "info_age": "60m", "chunk_total_size": "500M"},
+		map[string]string{"cache-tmp-upload-path": path.Join("/tmp", id)})
+	defer cleanupFs(t, rootFs, boltDb)
+
+	err := rootFs.Mkdir("test")
+	require.NoError(t, err)
+	minSize := 52428800
+	maxSize := 104857600
+	totalFiles := 100
+	rand.Seed(time.Now().Unix())
+	for i := 0; i < totalFiles; i++ {
+		size := int64(rand.Intn(maxSize-minSize) + minSize)
+		o := writeObjectRandomBytes(t, rootFs, "test", size)
+		// validate that it exists in temp fs
+		_, err = os.Stat(path.Join("/tmp", id, o.Remote()))
+		require.NoError(t, err)
+	}
+	// check if cache lists 100 files, likely temp upload didn't finish yet
+	de1, err := rootFs.List("test")
+	require.NoError(t, err)
+	require.Len(t, de1, totalFiles)
+
+	// wait for background uploader to do its thing
+	time.Sleep(time.Second * 1)
+
+	// retry until we have no more temp files and fail if they don't go down to 0
+	retryTimes := 5
+	for i := 1; i <= retryTimes; i++ {
+		tf, err := ioutil.ReadDir(path.Join("/tmp", id, "test"))
+		require.NoError(t, err)
+
+		if len(tf) > 0 && i < retryTimes {
+			time.Sleep(time.Second * time.Duration(i))
+			continue
+		}
+		require.Len(t, tf, 0)
+	}
+}
+
+func TestUploadTempFileOperations(t *testing.T) {
+	id := "tutfo"
+	_ = os.RemoveAll(path.Join("/tmp", id))
+	rootFs, boltDb := newCacheFs(t, *remoteName, id, true,
+		map[string]string{"chunk_size": "5M", "info_age": "60m", "chunk_total_size": "500M"},
+		map[string]string{"cache-tmp-upload-path": path.Join("/tmp", id), "cache-tmp-wait-time": "1h"})
+	defer cleanupFs(t, rootFs, boltDb)
+
+	boltDb.PurgeTempUploads()
+
+	// create some rand test data
+	_ = rootFs.Mkdir("test")
+	_ = writeObjectString(t, rootFs, "test/one", "one content")
+
+	// check if it can be read
+	obj1, err := rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	data1 := readDataFromObj(t, obj1, 0, int64(len([]byte("one content"))), false)
+	require.Equal(t, []byte("one content"), data1)
+	// validate that it exists in temp fs
+	_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+
+	// test DirMove
+	if rootFs.Features().DirMove != nil {
+		err = rootFs.Features().DirMove(rootFs, "test", "test2")
+		require.Error(t, err)
+		obj1, err = rootFs.NewObject("test/one")
+		require.NoError(t, err)
+		// validate that it exists in temp fs
+		_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+		require.NoError(t, err)
+		_ = rootFs.Mkdir("test")
+	} else {
+		t.Logf("DirMove not supported by %v", rootFs)
+	}
+
+	// test Rmdir
+	_ = writeObjectString(t, rootFs, "test/one", "one content")
+	obj1, err = rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	err = rootFs.Rmdir("test")
+	require.Error(t, err)
+	obj1, err = rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	// validate that it doesn't exist in temp fs
+	_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+
+	// test Move/Rename
+	if rootFs.Features().Move != nil {
+		_ = writeObjectString(t, rootFs, "test/one", "one content")
+		obj1, err := rootFs.NewObject("test/one")
+		require.NoError(t, err)
+		obj2, err := rootFs.Features().Move(obj1, "test/one2")
+		require.NoError(t, err)
+		// try to read from it
+		obj1, err = rootFs.NewObject("test/one")
+		require.Error(t, err)
+		obj2, err = rootFs.NewObject("test/one2")
+		require.NoError(t, err)
+		data2 := readDataFromObj(t, obj2, 0, int64(len([]byte("one content"))), false)
+		require.Equal(t, []byte("one content"), data2)
+		// validate that it exists in temp fs
+		_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+		require.Error(t, err)
+		_, err = os.Stat(path.Join("/tmp", id, "test/one2"))
+		require.NoError(t, err)
+	} else {
+		t.Logf("Move not supported by %v", rootFs)
+	}
+
+	// test Copy
+	if rootFs.Features().Copy != nil {
+		_ = writeObjectString(t, rootFs, "test/one", "one content")
+		obj1, err := rootFs.NewObject("test/one")
+		require.NoError(t, err)
+		obj3, err := rootFs.Features().Copy(obj1, "test/one3")
+		require.NoError(t, err)
+		// try to read from it
+		obj3, err = rootFs.NewObject("test/one3")
+		require.NoError(t, err)
+		data3 := readDataFromObj(t, obj3, 0, int64(len([]byte("one content"))), false)
+		require.Equal(t, []byte("one content"), data3)
+		// validate that it exists in temp fs
+		_, err = os.Stat(path.Join("/tmp", id, "test/one3"))
+		require.NoError(t, err)
+	} else {
+		t.Logf("Copy not supported by %v", rootFs)
+	}
+
+	// test Remove
+	_ = writeObjectString(t, rootFs, "test/one", "one content")
+	obj1, err = rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	err = obj1.Remove()
+	require.NoError(t, err)
+	_, err = rootFs.NewObject("test/one")
+	require.Error(t, err)
+	// validate that it doesn't exist in temp fs
+	_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+	require.Error(t, err)
+
+	// test Update
+	_ = writeObjectString(t, rootFs, "test/one", "one content")
+	obj1, err = rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	data1 = []byte("one content updated")
+	r := bytes.NewReader(data1)
+	objInfo1 := fs.NewStaticObjectInfo("test/one", time.Now(), int64(len(data1)), true, nil, rootFs)
+	err = obj1.Update(r, objInfo1)
+	require.NoError(t, err)
+	tmpInfo, err := os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+	require.Equal(t, int64(len(data1)), tmpInfo.Size())
+	obj2, err := rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	data2 := readDataFromObj(t, obj2, 0, int64(len(data1)), false)
+	require.Equal(t, data1, data2)
+	err = obj2.Remove()
+	require.NoError(t, err)
+
+	// test SetModTime
+	_ = writeObjectString(t, rootFs, "test/one", "one content")
+	obj1, err = rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	futureDate := time.Now().Add(time.Minute * 60)
+	err = obj1.SetModTime(futureDate)
+	require.NoError(t, err)
+	tmpInfo, err = os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+	require.WithinDuration(t, futureDate, tmpInfo.ModTime(), okDiff)
+	obj2, err = rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	require.WithinDuration(t, futureDate, obj2.ModTime(), okDiff)
+}
+
+func TestUploadUploadingFileOperations(t *testing.T) {
+	id := "tuufo"
+	_ = os.RemoveAll(path.Join("/tmp", id))
+	rootFs, boltDb := newCacheFs(t, *remoteName, id, true,
+		map[string]string{"chunk_size": "5M", "info_age": "60m", "chunk_total_size": "500M"},
+		map[string]string{"cache-tmp-upload-path": path.Join("/tmp", id), "cache-tmp-wait-time": "1h"})
+	defer cleanupFs(t, rootFs, boltDb)
+
+	boltDb.PurgeTempUploads()
+
+	// create some rand test data
+	_ = rootFs.Mkdir("test")
+	_ = writeObjectString(t, rootFs, "test/one", "one content")
+
+	// check if it can be read
+	obj1, err := rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	data1 := readDataFromObj(t, obj1, 0, int64(len([]byte("one content"))), false)
+	require.Equal(t, []byte("one content"), data1)
+	// validate that it exists in temp fs
+	_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+
+	err = boltDb.SetPendingUploadToStarted(path.Join(rootFs.Root(), "test/one"))
+	require.NoError(t, err)
+
+	// test DirMove
+	if rootFs.Features().DirMove != nil {
+		err = rootFs.Features().DirMove(rootFs, "test", "test2")
+		require.Error(t, err)
+		t.Logf("DirMove expected error: %v", err)
+		obj1, err = rootFs.NewObject("test/one")
+		require.NoError(t, err)
+		// validate that it exists in temp fs
+		_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+		require.NoError(t, err)
+	} else {
+		t.Logf("DirMove not supported by %v", rootFs)
+	}
+
+	err = rootFs.Rmdir("test")
+	require.Error(t, err)
+	t.Logf("Rmdir expected error: %v", err)
+	obj1, err = rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	// validate that it exists in temp fs
+	_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+
+	// test Move/Rename
+	if rootFs.Features().Move != nil {
+		_, err := rootFs.Features().Move(obj1, "test/one2")
+		require.Error(t, err)
+		t.Logf("Move expected error: %v", err)
+		obj1, err = rootFs.NewObject("test/one")
+		require.NoError(t, err)
+		// validate that it exists in temp fs
+		_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+		require.NoError(t, err)
+	} else {
+		t.Logf("Move not supported by %v", rootFs)
+	}
+
+	// test Copy -- allowed
+	if rootFs.Features().Copy != nil {
+		_, err := rootFs.Features().Copy(obj1, "test/one2")
+		require.NoError(t, err)
+		obj1, err = rootFs.NewObject("test/one")
+		require.NoError(t, err)
+		obj2, err := rootFs.NewObject("test/one2")
+		require.NoError(t, err)
+		data2 := readDataFromObj(t, obj2, 0, int64(len([]byte("one content"))), false)
+		require.Equal(t, []byte("one content"), data2)
+		// validate that it exists in temp fs
+		_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+		require.NoError(t, err)
+		_, err = os.Stat(path.Join("/tmp", id, "test/one2"))
+		require.NoError(t, err)
+	} else {
+		t.Logf("Copy not supported by %v", rootFs)
+	}
+
+	// test Remove
+	err = obj1.Remove()
+	require.Error(t, err)
+	t.Logf("Remove expected error: %v", err)
+	_, err = rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	// validate that it exists in temp fs
+	_, err = os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+
+	// test Update
+	data1 = []byte("one content updated")
+	r := bytes.NewReader(data1)
+	objInfo1 := fs.NewStaticObjectInfo("test/one", time.Now(), int64(len(data1)), true, nil, rootFs)
+	err = obj1.Update(r, objInfo1)
+	require.Error(t, err)
+	t.Logf("Updated expected error: %v", err)
+	tmpInfo, err := os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+	data2 := readDataFromObj(t, obj1, 0, int64(len(data1)), true)
+	require.Equal(t, "one content", string(data2))
+
+	// test SetModTime -- allowed
+	futureDate := time.Now().Add(time.Minute * 60)
+	err = obj1.SetModTime(futureDate)
+	require.NoError(t, err)
+	tmpInfo, err = os.Stat(path.Join("/tmp", id, "test/one"))
+	require.NoError(t, err)
+	require.WithinDuration(t, futureDate, tmpInfo.ModTime(), okDiff)
+	obj2, err := rootFs.NewObject("test/one")
+	require.NoError(t, err)
+	require.WithinDuration(t, futureDate, obj2.ModTime(), okDiff)
+}
+
+func writeObjectRandomBytes(t *testing.T, f fs.Fs, p string, size int64) fs.Object {
+	remote := path.Join(p, strconv.Itoa(rand.Int())+".bin")
 	// create some rand test data
 	testData := make([]byte, size)
 	testSize, err := rand.Read(testData)
@@ -515,7 +875,7 @@ func updateObjectBytes(t *testing.T, f fs.Fs, remote string, data1 []byte, data2
 	return obj
 }
 
-func readDataFromObj(t *testing.T, co fs.Object, offset, end int64, useSeek bool) []byte {
+func readDataFromObj(t *testing.T, co fs.Object, offset, end int64, noLengthCheck bool) []byte {
 	var reader io.ReadCloser
 	var err error
 	size := end - offset
@@ -525,9 +885,15 @@ func readDataFromObj(t *testing.T, co fs.Object, offset, end int64, useSeek bool
 	require.NoError(t, err)
 
 	totalRead, err := io.ReadFull(reader, checkSample)
+	if err == io.ErrUnexpectedEOF && noLengthCheck {
+		err = nil
+		checkSample = checkSample[:totalRead]
+	}
 	require.NoError(t, err)
 	_ = reader.Close()
-	require.Equal(t, int64(totalRead), size, "wrong data read size from file")
+	if !noLengthCheck {
+		require.Equal(t, int64(totalRead), size, "wrong data read size from file")
+	}
 
 	return checkSample
 }
@@ -535,167 +901,83 @@ func readDataFromObj(t *testing.T, co fs.Object, offset, end int64, useSeek bool
 func cleanupFs(t *testing.T, f fs.Fs, b *cache.Persistent) {
 	err := f.Features().Purge()
 	require.NoError(t, err)
-	b.Close()
+	cfs, err := getCacheFs(f)
+	require.NoError(t, err)
+	cfs.StopBackgroundRunners()
 }
 
-func newLocalCacheCryptFs(t *testing.T, localRemote, cacheRemote, cryptRemote string, purge bool, cfg map[string]string) (fs.Fs, *cache.Persistent) {
+func newCacheFs(t *testing.T, remote, id string, purge bool, cfg map[string]string, flags map[string]string) (fs.Fs, *cache.Persistent) {
 	fstest.Initialise()
+
+	remoteExists := false
+	for _, s := range fs.ConfigFileSections() {
+		if s == remote {
+			remoteExists = true
+		}
+	}
+
+	// if the remote doesn't exist, create a new one with a local one for it
+	// identify which is the cache remote (it can be wrapped by a crypt too)
+	cacheRemote := remote
+	if !remoteExists {
+		localRemote := remote + "-local"
+		fs.ConfigFileSet(localRemote, "type", "local")
+		fs.ConfigFileSet(localRemote, "nounc", "true")
+		fs.ConfigFileSet(remote, "type", "cache")
+		fs.ConfigFileSet(remote, "remote", localRemote+":/var/tmp/"+localRemote)
+	} else {
+		remoteType := fs.ConfigFileGet(remote, "type", "")
+		if remoteType == "" {
+			t.Skipf("skipped due to invalid remote type for %v", remote)
+			return nil, nil
+		}
+		if remoteType != "cache" {
+			remoteRemote := fs.ConfigFileGet(remote, "remote", "")
+			if remoteRemote == "" {
+				t.Skipf("skipped due to invalid remote wrapper for %v", remote)
+				return nil, nil
+			}
+			remoteRemoteParts := strings.Split(remoteRemote, ":")
+			remoteWrapping := remoteRemoteParts[0]
+			remoteType := fs.ConfigFileGet(remoteWrapping, "type", "")
+			if remoteType != "cache" {
+				t.Skipf("skipped due to invalid remote type for %v: '%v'", remoteWrapping, remoteType)
+				return nil, nil
+			}
+			cacheRemote = remoteWrapping
+		}
+	}
+
 	dbPath := filepath.Join(fs.CacheDir, "cache-backend", cacheRemote+".db")
 	chunkPath := filepath.Join(fs.CacheDir, "cache-backend", cacheRemote)
 	boltDb, err := cache.GetPersistent(dbPath, chunkPath, &cache.Features{PurgeDb: true})
 	require.NoError(t, err)
 
-	localExists := false
-	cacheExists := false
-	cryptExists := false
-	for _, s := range fs.ConfigFileSections() {
-		if s == localRemote {
-			localExists = true
-		}
-		if s == cacheRemote {
-			cacheExists = true
-		}
-		if s == cryptRemote {
-			cryptExists = true
+	for k, v := range allCfgMap {
+		if c, ok := cfg[k]; ok {
+			fs.ConfigFileSet(cacheRemote, k, c)
+		} else {
+			fs.ConfigFileSet(cacheRemote, k, v)
 		}
 	}
-
-	localRemoteWrap := ""
-	if !localExists {
-		localRemoteWrap = localRemote + ":/var/tmp/" + localRemote
-		fs.ConfigFileSet(localRemote, "type", "local")
-		fs.ConfigFileSet(localRemote, "nounc", "true")
-	}
-
-	if !cacheExists {
-		fs.ConfigFileSet(cacheRemote, "type", "cache")
-		fs.ConfigFileSet(cacheRemote, "remote", localRemoteWrap)
-	}
-	if c, ok := cfg["chunk_size"]; ok {
-		fs.ConfigFileSet(cacheRemote, "chunk_size", c)
-	} else {
-		fs.ConfigFileSet(cacheRemote, "chunk_size", "1m")
-	}
-	if c, ok := cfg["chunk_total_size"]; ok {
-		fs.ConfigFileSet(cacheRemote, "chunk_total_size", c)
-	} else {
-		fs.ConfigFileSet(cacheRemote, "chunk_total_size", "2m")
-	}
-	if c, ok := cfg["info_age"]; ok {
-		fs.ConfigFileSet(cacheRemote, "info_age", c)
-	} else {
-		fs.ConfigFileSet(cacheRemote, "info_age", infoAge.String())
-	}
-
-	if !cryptExists {
-		t.Skipf("Skipping due to missing crypt remote: %v", cryptRemote)
-	}
-
-	if c, ok := cfg["cache-chunk-no-memory"]; ok {
-		_ = flag.Set("cache-chunk-no-memory", c)
-	} else {
-		_ = flag.Set("cache-chunk-no-memory", "true")
-	}
-	if c, ok := cfg["cache-workers"]; ok {
-		_ = flag.Set("cache-workers", c)
-	} else {
-		_ = flag.Set("cache-workers", strconv.Itoa(workers))
-	}
-	if c, ok := cfg["cache-chunk-clean-interval"]; ok {
-		_ = flag.Set("cache-chunk-clean-interval", c)
-	} else {
-		_ = flag.Set("cache-chunk-clean-interval", chunkClean.String())
-	}
-	if c, ok := cfg["cache-writes"]; ok {
-		_ = flag.Set("cache-writes", c)
-	} else {
-		_ = flag.Set("cache-writes", strconv.FormatBool(cache.DefCacheWrites))
+	for k, v := range allFlagMap {
+		if c, ok := flags[k]; ok {
+			_ = flag.Set(k, c)
+		} else {
+			_ = flag.Set(k, v)
+		}
 	}
 
 	// Instantiate root
-	f, err := fs.NewFs(cryptRemote + ":")
+	if purge {
+		boltDb.PurgeTempUploads()
+	}
+	f, err := fs.NewFs(remote + ":" + id)
 	require.NoError(t, err)
 	if purge {
 		_ = f.Features().Purge()
 		require.NoError(t, err)
 	}
-	err = f.Mkdir("")
-	require.NoError(t, err)
-
-	return f, boltDb
-}
-
-func newLocalCacheFs(t *testing.T, localRemote, cacheRemote string, cfg map[string]string) (fs.Fs, *cache.Persistent) {
-	fstest.Initialise()
-	dbPath := filepath.Join(fs.CacheDir, "cache-backend", cacheRemote+".db")
-	chunkPath := filepath.Join(fs.CacheDir, "cache-backend", cacheRemote)
-	boltDb, err := cache.GetPersistent(dbPath, chunkPath, &cache.Features{PurgeDb: true})
-	require.NoError(t, err)
-
-	localExists := false
-	cacheExists := false
-	for _, s := range fs.ConfigFileSections() {
-		if s == localRemote {
-			localExists = true
-		}
-		if s == cacheRemote {
-			cacheExists = true
-		}
-	}
-
-	localRemoteWrap := ""
-	if !localExists {
-		localRemoteWrap = localRemote + ":/var/tmp/" + localRemote
-		fs.ConfigFileSet(localRemote, "type", "local")
-		fs.ConfigFileSet(localRemote, "nounc", "true")
-	}
-
-	if !cacheExists {
-		fs.ConfigFileSet(cacheRemote, "type", "cache")
-		fs.ConfigFileSet(cacheRemote, "remote", localRemoteWrap)
-	}
-	if c, ok := cfg["chunk_size"]; ok {
-		fs.ConfigFileSet(cacheRemote, "chunk_size", c)
-	} else {
-		fs.ConfigFileSet(cacheRemote, "chunk_size", "1m")
-	}
-	if c, ok := cfg["chunk_total_size"]; ok {
-		fs.ConfigFileSet(cacheRemote, "chunk_total_size", c)
-	} else {
-		fs.ConfigFileSet(cacheRemote, "chunk_total_size", "2m")
-	}
-	if c, ok := cfg["info_age"]; ok {
-		fs.ConfigFileSet(cacheRemote, "info_age", c)
-	} else {
-		fs.ConfigFileSet(cacheRemote, "info_age", infoAge.String())
-	}
-
-	if c, ok := cfg["cache-chunk-no-memory"]; ok {
-		_ = flag.Set("cache-chunk-no-memory", c)
-	} else {
-		_ = flag.Set("cache-chunk-no-memory", "true")
-	}
-	if c, ok := cfg["cache-workers"]; ok {
-		_ = flag.Set("cache-workers", c)
-	} else {
-		_ = flag.Set("cache-workers", strconv.Itoa(workers))
-	}
-	if c, ok := cfg["cache-chunk-clean-interval"]; ok {
-		_ = flag.Set("cache-chunk-clean-interval", c)
-	} else {
-		_ = flag.Set("cache-chunk-clean-interval", chunkClean.String())
-	}
-	if c, ok := cfg["cache-writes"]; ok {
-		_ = flag.Set("cache-writes", c)
-	} else {
-		_ = flag.Set("cache-writes", strconv.FormatBool(cache.DefCacheWrites))
-	}
-
-	// Instantiate root
-	f, err := fs.NewFs(cacheRemote + ":")
-	require.NoError(t, err)
-	_ = f.Features().Purge()
-	require.NoError(t, err)
 	err = f.Mkdir("")
 	require.NoError(t, err)
 
@@ -719,22 +1001,22 @@ func newLocalCacheFs(t *testing.T, localRemote, cacheRemote string, cfg map[stri
 //	time.Sleep(time.Second * 3)
 //}
 
-func unmountFs(t *testing.T, mntPoint string) {
-	var out []byte
-	var err error
-
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping test cause on windows")
-		return
-	} else if runtime.GOOS == "linux" {
-		out, err = exec.Command("fusermount", "-u", mntPoint).Output()
-	} else if runtime.GOOS == "darwin" {
-		out, err = exec.Command("diskutil", "unmount", mntPoint).Output()
-	}
-
-	t.Logf("Unmount output: %v", string(out))
-	require.NoError(t, err)
-}
+//func unmountFs(t *testing.T, mntPoint string) {
+//	var out []byte
+//	var err error
+//
+//	if runtime.GOOS == "windows" {
+//		t.Skip("Skipping test cause on windows")
+//		return
+//	} else if runtime.GOOS == "linux" {
+//		out, err = exec.Command("fusermount", "-u", mntPoint).Output()
+//	} else if runtime.GOOS == "darwin" {
+//		out, err = exec.Command("diskutil", "unmount", mntPoint).Output()
+//	}
+//
+//	t.Logf("Unmount output: %v", string(out))
+//	require.NoError(t, err)
+//}
 
 func getCacheFs(f fs.Fs) (*cache.Fs, error) {
 	cfs, ok := f.(*cache.Fs)

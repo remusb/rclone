@@ -9,14 +9,41 @@ import (
 	"sync"
 	"time"
 
+	"path"
+	"runtime"
+	"strings"
+
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
 )
 
+var uploaderMap = make(map[string]*backgroundWriter)
+var uploaderMapMx sync.Mutex
+
+// initBackgroundUploader returns a single instance
+func initBackgroundUploader(fs *Fs) (*backgroundWriter, error) {
+	// write lock to create one
+	uploaderMapMx.Lock()
+	defer uploaderMapMx.Unlock()
+	if b, ok := uploaderMap[fs.String()]; ok {
+		// if it was already started we close it so that it can be started again
+		if b.running {
+			b.close()
+		} else {
+			return b, nil
+		}
+	}
+
+	bb := newBackgroundWriter(fs)
+	uploaderMap[fs.String()] = bb
+	return uploaderMap[fs.String()], nil
+}
+
 // Handle is managing the read/write/seek operations on an open handle
 type Handle struct {
 	cachedObject   *Object
-	memory         ChunkStorage
+	cfs            *Fs
+	memory         *Memory
 	preloadQueue   chan int64
 	preloadOffset  int64
 	offset         int64
@@ -31,20 +58,21 @@ type Handle struct {
 }
 
 // NewObjectHandle returns a new Handle for an existing Object
-func NewObjectHandle(o *Object) *Handle {
+func NewObjectHandle(o *Object, cfs *Fs) *Handle {
 	r := &Handle{
 		cachedObject:  o,
+		cfs:           cfs,
 		offset:        0,
 		preloadOffset: -1, // -1 to trigger the first preload
 
-		UseMemory: o.CacheFs.chunkMemory,
+		UseMemory: cfs.chunkMemory,
 		reading:   false,
 	}
 	r.seenOffsets = make(map[int64]bool)
 	r.memory = NewMemory(-1)
 
 	// create a larger buffer to queue up requests
-	r.preloadQueue = make(chan int64, o.CacheFs.totalWorkers*10)
+	r.preloadQueue = make(chan int64, r.cfs.totalWorkers*10)
 	r.confirmReading = make(chan bool)
 	r.startReadWorkers()
 	return r
@@ -52,11 +80,11 @@ func NewObjectHandle(o *Object) *Handle {
 
 // cacheFs is a convenience method to get the parent cache FS of the object's manager
 func (r *Handle) cacheFs() *Fs {
-	return r.cachedObject.CacheFs
+	return r.cfs
 }
 
 // storage is a convenience method to get the persistent storage of the object's manager
-func (r *Handle) storage() Storage {
+func (r *Handle) storage() *Persistent {
 	return r.cacheFs().cache
 }
 
@@ -156,7 +184,6 @@ func (r *Handle) queueOffset(offset int64) {
 		if r.UseMemory {
 			go r.memory.CleanChunksByNeed(offset)
 		}
-		go r.cacheFs().CleanUpCache(false)
 		r.confirmExternalReading()
 		r.preloadOffset = offset
 
@@ -305,7 +332,6 @@ func (r *Handle) Close() error {
 		}
 	}
 
-	go r.cacheFs().CleanUpCache(false)
 	fs.Debugf(r, "cache reader closed %v", r.offset)
 	return nil
 }
@@ -361,7 +387,7 @@ func (w *worker) reader(offset, end int64) (io.ReadCloser, error) {
 	var err error
 	r := w.rc
 	if w.rc == nil {
-		r, err = w.r.cacheFs().OpenRateLimited(func() (io.ReadCloser, error) {
+		r, err = w.r.cacheFs().openRateLimited(func() (io.ReadCloser, error) {
 			return w.r.cachedObject.Object.Open(&fs.SeekOption{Offset: offset}, &fs.RangeOption{Start: offset, End: end})
 		})
 		if err != nil {
@@ -377,7 +403,7 @@ func (w *worker) reader(offset, end int64) (io.ReadCloser, error) {
 	}
 
 	_ = w.rc.Close()
-	return w.r.cacheFs().OpenRateLimited(func() (io.ReadCloser, error) {
+	return w.r.cacheFs().openRateLimited(func() (io.ReadCloser, error) {
 		r, err = w.r.cachedObject.Object.Open(&fs.SeekOption{Offset: offset}, &fs.RangeOption{Start: offset, End: end})
 		if err != nil {
 			return nil, err
@@ -496,6 +522,86 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	err = w.r.storage().AddChunk(w.r.cachedObject.abs(), data, chunkStart)
 	if err != nil {
 		fs.Errorf(w, "failed caching chunk in storage %v: %v", chunkStart, err)
+	}
+}
+
+type backgroundWriter struct {
+	fs      *Fs
+	stateCh chan int
+	running bool
+}
+
+func newBackgroundWriter(f *Fs) *backgroundWriter {
+	b := &backgroundWriter{
+		fs:      f,
+		stateCh: make(chan int),
+	}
+
+	return b
+}
+
+func (b *backgroundWriter) close() {
+	b.stateCh <- 2
+}
+
+func (b *backgroundWriter) pause() {
+	b.stateCh <- 1
+}
+
+func (b *backgroundWriter) play() {
+	b.stateCh <- 0
+}
+
+func (b *backgroundWriter) run() {
+	state := 0
+	for {
+		b.running = true
+		select {
+		case s := <-b.stateCh:
+			state = s
+		default:
+			switch state {
+			case 1:
+				runtime.Gosched()
+				time.Sleep(time.Millisecond * 500)
+				continue
+			case 2:
+				b.running = false
+				return
+			}
+		}
+
+		absPath, err := b.fs.cache.getPendingUpload(b.fs.tempWriteWait)
+		if err != nil || absPath == "" || !b.fs.isRootInPath(absPath) {
+			time.Sleep(time.Second)
+			continue
+		}
+
+		remote := b.fs.cleanRootFromPath(absPath)
+		err = fs.MoveFile(b.fs.UnWrap(), b.fs.tempFs, remote, remote)
+		if err != nil {
+			fs.Errorf(remote, "background upload: %v", err)
+			continue
+		} else {
+			fs.Infof(remote, "background upload: uploaded entry")
+		}
+		err = b.fs.cache.removePendingUpload(absPath)
+		if err != nil && !strings.Contains(err.Error(), "pending upload not found") {
+			fs.Errorf(remote, "background upload: %v", err)
+		}
+		err = b.fs.cache.RemoveObject(absPath)
+		if err != nil {
+			fs.Errorf(remote, "background upload: remove error: %v", err)
+		} else {
+			fs.Debugf(remote, "background upload: removed from cache")
+		}
+		parentCd := NewDirectory(b.fs, cleanPath(path.Dir(remote)))
+		err = b.fs.cache.ExpireDir(parentCd)
+		if err != nil {
+			fs.Errorf(parentCd, "background upload: cache expire error: %v", err)
+		} else {
+			fs.Infof(parentCd, "background upload: cache expired")
+		}
 	}
 }
 
