@@ -48,7 +48,7 @@ func NewObject(f *Fs, remote string) *Object {
 		if err == nil { // queued for upload
 			cacheType = objectPendingUpload
 			parentFs = f.tempFs
-			fs.Infof(fullRemote, "pending upload found")
+			fs.Debugf(fullRemote, "pending upload found")
 		}
 	}
 
@@ -79,7 +79,7 @@ func ObjectFromOriginal(f *Fs, o fs.Object) *Object {
 		if err == nil { // queued for upload
 			cacheType = objectPendingUpload
 			parentFs = f.tempFs
-			fs.Infof(fullRemote, "pending upload found")
+			fs.Debugf(fullRemote, "pending upload found")
 		}
 	}
 
@@ -229,7 +229,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 			return errors.Errorf("%v is currently uploading, can't update", o)
 		}
 	}
-	fs.Infof(o, "updating object contents with size %v", src.Size())
+	fs.Debugf(o, "updating object contents with size %v", src.Size())
 
 	// FIXME use reliable upload
 	err := o.Object.Update(in, src, options...)
@@ -269,7 +269,7 @@ func (o *Object) Remove() error {
 		return err
 	}
 
-	fs.Infof(o, "removing object")
+	fs.Debugf(o, "removing object")
 	_ = o.CacheFs.cache.RemoveObject(o.abs())
 	_ = o.CacheFs.cache.removePendingUpload(o.abs())
 	_ = o.CacheFs.cache.ExpireDir(NewDirectory(o.CacheFs, cleanPath(path.Dir(o.Remote()))))

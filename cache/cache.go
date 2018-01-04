@@ -425,9 +425,9 @@ func (f *Fs) NewObject(remote string) (fs.Object, error) {
 	// search for entry in cache and validate it
 	err = f.cache.GetObject(co)
 	if err != nil {
-		fs.Infof(remote, "find: error: %v", err)
+		fs.Debugf(remote, "find: error: %v", err)
 	} else if time.Now().After(co.CacheTs.Add(f.fileAge)) {
-		fs.Infof(co, "find: cold object: %+v", co)
+		fs.Debugf(co, "find: cold object: %+v", co)
 	} else {
 		fs.Debugf(co, "find: warm object: %v, expiring on: %v", co, co.CacheTs.Add(f.fileAge))
 		return co, nil
@@ -451,13 +451,13 @@ func (f *Fs) NewObject(remote string) (fs.Object, error) {
 
 	// not found in either fs
 	if err != nil {
-		fs.Infof(obj, "find failed: not found in either local or remote fs")
+		fs.Debugf(obj, "find failed: not found in either local or remote fs")
 		return nil, err
 	}
 
 	// cache the new entry
 	co = ObjectFromOriginal(f, obj).persist()
-	fs.Debugf(co, "find: cached new object")
+	fs.Infof(co, "find: cached object")
 	return co, nil
 }
 
@@ -469,14 +469,14 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	// search for cached dir entries and validate them
 	entries, err = f.cache.GetDirEntries(cd)
 	if err != nil {
-		fs.Infof(dir, "list: error: %v", err)
+		fs.Debugf(dir, "list: error: %v", err)
 	} else if time.Now().After(cd.CacheTs.Add(f.fileAge)) {
-		fs.Infof(dir, "list: cold listing: %v", cd.CacheTs)
+		fs.Debugf(dir, "list: cold listing: %v", cd.CacheTs)
 	} else if len(entries) == 0 {
 		// TODO: read empty dirs from source?
-		fs.Infof(dir, "list: empty listing")
+		fs.Debugf(dir, "list: empty listing")
 	} else {
-		fs.Infof(dir, "list: warm %v from cache for: %v, expiring on: %v", len(entries), cd.abs(), cd.CacheTs.Add(f.fileAge))
+		fs.Debugf(dir, "list: warm %v from cache for: %v, expiring on: %v", len(entries), cd.abs(), cd.CacheTs.Add(f.fileAge))
 		fs.Debugf(dir, "list: cached entries: %v", entries)
 		return entries, nil
 	}
@@ -489,13 +489,13 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 		if err != nil {
 			fs.Errorf(dir, "list: error getting pending uploads: %v", err)
 		} else {
-			fs.Infof(dir, "list: read %v from temp fs", len(queuedEntries))
+			fs.Debugf(dir, "list: read %v from temp fs", len(queuedEntries))
 			fs.Debugf(dir, "list: temp fs entries: %v", queuedEntries)
 
 			for _, queuedRemote := range queuedEntries {
 				queuedEntry, err := f.tempFs.NewObject(f.cleanRootFromPath(queuedRemote))
 				if err != nil {
-					fs.Infof(dir, "list: temp file not found in local fs: %v", err)
+					fs.Debugf(dir, "list: temp file not found in local fs: %v", err)
 					continue
 				}
 				co := ObjectFromOriginal(f, queuedEntry).persist()
@@ -510,7 +510,7 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	if err != nil {
 		return nil, err
 	}
-	fs.Infof(dir, "list: read %v from source", len(entries))
+	fs.Debugf(dir, "list: read %v from source", len(entries))
 	fs.Debugf(dir, "list: source entries: %v", entries)
 
 	// and then iterate over the ones from source (temp Objects will override source ones)
@@ -669,7 +669,7 @@ func (f *Fs) Rmdir(dir string) error {
 		if err != nil {
 			fs.Errorf(dir, "rmdir: error getting pending uploads: %v", err)
 		} else {
-			fs.Infof(dir, "rmdir: read %v from temp fs", len(queuedEntries))
+			fs.Debugf(dir, "rmdir: read %v from temp fs", len(queuedEntries))
 			fs.Debugf(dir, "rmdir: temp fs entries: %v", queuedEntries)
 			if len(queuedEntries) > 0 {
 				fs.Errorf(dir, "rmdir: can't remove dir with files pending upload in it")
@@ -742,7 +742,7 @@ func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 		if err != nil {
 			fs.Errorf(srcRemote, "dirmove: error getting pending uploads: %v", err)
 		} else {
-			fs.Infof(srcRemote, "dirmove: read %v from temp fs", len(queuedEntries))
+			fs.Debugf(srcRemote, "dirmove: read %v from temp fs", len(queuedEntries))
 			fs.Debugf(srcRemote, "dirmove: temp fs entries: %v", queuedEntries)
 			if len(queuedEntries) > 0 {
 				fs.Errorf(srcRemote, "dirmove: can't move dir with files pending upload in it")
