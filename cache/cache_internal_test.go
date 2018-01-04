@@ -50,7 +50,7 @@ var (
 		"cache-rps":                  strconv.Itoa(cache.DefCacheRps),
 		"cache-writes":               "false",
 		"cache-tmp-upload-path":      "",
-		"cache-tmp-wait-time":        "0s",
+		"cache-tmp-wait-time":        cache.DefCacheTmpWaitTime,
 	}
 )
 
@@ -904,6 +904,10 @@ func cleanupFs(t *testing.T, f fs.Fs, b *cache.Persistent) {
 	cfs, err := getCacheFs(f)
 	require.NoError(t, err)
 	cfs.StopBackgroundRunners()
+
+	for k, v := range allFlagMap {
+		_ = flag.Set(k, v)
+	}
 }
 
 func newCacheFs(t *testing.T, remote, id string, purge bool, cfg map[string]string, flags map[string]string) (fs.Fs, *cache.Persistent) {
