@@ -44,7 +44,7 @@ func NewObject(f *Fs, remote string) *Object {
 	cacheType := objectInCache
 	parentFs := f.UnWrap()
 	if f.tempWritePath != "" {
-		_, err := f.cache.searchPendingUpload(fullRemote)
+		_, err := f.cache.SearchPendingUpload(fullRemote)
 		if err == nil { // queued for upload
 			cacheType = objectPendingUpload
 			parentFs = f.tempFs
@@ -75,7 +75,7 @@ func ObjectFromOriginal(f *Fs, o fs.Object) *Object {
 	cacheType := objectInCache
 	parentFs := f.UnWrap()
 	if f.tempWritePath != "" {
-		_, err := f.cache.searchPendingUpload(fullRemote)
+		_, err := f.cache.SearchPendingUpload(fullRemote)
 		if err == nil { // queued for upload
 			cacheType = objectPendingUpload
 			parentFs = f.tempFs
@@ -144,13 +144,13 @@ func (o *Object) Storable() bool {
 }
 
 // refreshFromSource requests the original FS for the object in case it comes from a cached entry
-func (o *Object) refreshFromSource() error {
+func (o *Object) refreshFromSource(force bool) error {
 	o.refreshMutex.Lock()
 	defer o.refreshMutex.Unlock()
 	var err error
 	var liveObject fs.Object
 
-	if o.Object != nil {
+	if o.Object != nil && !force {
 		return nil
 	}
 	if o.isTempFile() {
@@ -172,7 +172,7 @@ func (o *Object) refreshFromSource() error {
 
 // SetModTime sets the ModTime of this object
 func (o *Object) SetModTime(t time.Time) error {
-	if err := o.refreshFromSource(); err != nil {
+	if err := o.refreshFromSource(false); err != nil {
 		return err
 	}
 
@@ -190,13 +190,14 @@ func (o *Object) SetModTime(t time.Time) error {
 
 // Open is used to request a specific part of the file using fs.RangeOption
 func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
-	if err := o.refreshFromSource(); err != nil {
+	if err := o.refreshFromSource(true); err != nil {
 		return nil, err
 	}
 
-	if o.isTempFile() {
-		return o.Object.Open(options...)
-	}
+	//if o.isTempFile() {
+	//	fs.Infof(o, "opening file from temp fs")
+	//	return o.Object.Open(options...)
+	//}
 
 	var err error
 	cacheReader := NewObjectHandle(o, o.CacheFs)
@@ -217,7 +218,7 @@ func (o *Object) Open(options ...fs.OpenOption) (io.ReadCloser, error) {
 
 // Update will change the object data
 func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
-	if err := o.refreshFromSource(); err != nil {
+	if err := o.refreshFromSource(false); err != nil {
 		return err
 	}
 	// pause background uploads if active
@@ -252,7 +253,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOptio
 
 // Remove deletes the object from both the cache and the source
 func (o *Object) Remove() error {
-	if err := o.refreshFromSource(); err != nil {
+	if err := o.refreshFromSource(false); err != nil {
 		return err
 	}
 	// pause background uploads if active
@@ -288,7 +289,7 @@ func (o *Object) Hash(ht fs.HashType) (string, error) {
 	if found {
 		return cachedHash, nil
 	}
-	if err := o.refreshFromSource(); err != nil {
+	if err := o.refreshFromSource(false); err != nil {
 		return "", err
 	}
 	liveHash, err := o.Object.Hash(ht)
@@ -313,7 +314,7 @@ func (o *Object) persist() *Object {
 }
 
 func (o *Object) isTempFile() bool {
-	_, err := o.CacheFs.cache.searchPendingUpload(o.abs())
+	_, err := o.CacheFs.cache.SearchPendingUpload(o.abs())
 	if err != nil {
 		o.CacheType = objectInCache
 		return false
@@ -324,7 +325,7 @@ func (o *Object) isTempFile() bool {
 }
 
 func (o *Object) tempFileStartedUpload() bool {
-	started, err := o.CacheFs.cache.searchPendingUpload(o.abs())
+	started, err := o.CacheFs.cache.SearchPendingUpload(o.abs())
 	if err != nil {
 		return false
 	}

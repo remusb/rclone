@@ -19,6 +19,7 @@ import (
 	bolt "github.com/coreos/bbolt"
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
+	"fmt"
 )
 
 // Constants
@@ -70,6 +71,11 @@ type tempUploadInfo struct {
 	DestPath string
 	AddedOn  time.Time
 	Started  bool
+}
+
+// String representation of a tempUploadInfo
+func (t *tempUploadInfo) String() string {
+	return fmt.Sprintf("%v - %v (%v)", t.DestPath, t.Started, t.AddedOn)
 }
 
 // Persistent is a wrapper of persistent storage for a bolt.DB file
@@ -140,7 +146,9 @@ func (b *Persistent) getBucket(dir string, createIfMissing bool, tx *bolt.Tx) *b
 	cleanPath(dir)
 
 	entries := strings.FieldsFunc(dir, func(c rune) bool {
-		return os.PathSeparator == c
+		// cover Windows where rclone still uses '/' as path separator
+		// this should be safe as '/' is not a valid Windows character
+		return (os.PathSeparator == c || c == rune('/'))
 	})
 	bucket := tx.Bucket([]byte(RootBucket))
 
@@ -482,6 +490,7 @@ func (b *Persistent) CleanChunksBySize(maxSize int64) {
 	b.cleanupMux.Lock()
 	defer b.cleanupMux.Unlock()
 	var cntChunks int
+	var roughlyCleaned fs.SizeSuffix
 
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		dataTsBucket := tx.Bucket([]byte(DataTsBucket))
@@ -503,6 +512,7 @@ func (b *Persistent) CleanChunksBySize(maxSize int64) {
 
 		if totalSize > maxSize {
 			needToClean := totalSize - maxSize
+			roughlyCleaned = fs.SizeSuffix(needToClean)
 			for k, v := c.First(); k != nil; k, v = c.Next() {
 				var ci chunkInfo
 				err := json.Unmarshal(v, &ci)
@@ -525,7 +535,10 @@ func (b *Persistent) CleanChunksBySize(maxSize int64) {
 				}
 			}
 		}
-		fs.Infof("cache", "deleted (%v) chunks", cntChunks)
+		if cntChunks > 0 {
+			fs.Infof("cache-cleanup", "chunks %v, est. size: %v", cntChunks, roughlyCleaned.String())
+
+		}
 		return nil
 	})
 
@@ -748,7 +761,7 @@ func (b *Persistent) addPendingUpload(destPath string, started bool) error {
 }
 
 // getPendingUpload returns the next file from the pending queue of uploads
-func (b *Persistent) getPendingUpload(waitTime time.Duration) (destPath string, err error) {
+func (b *Persistent) getPendingUpload(inRoot string, waitTime time.Duration) (destPath string, err error) {
 	b.tempQueueMux.Lock()
 	defer b.tempQueueMux.Unlock()
 
@@ -759,7 +772,8 @@ func (b *Persistent) getPendingUpload(waitTime time.Duration) (destPath string, 
 		}
 
 		c := bucket.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		for k, v := c.Seek([]byte(inRoot)); k != nil && bytes.HasPrefix(k, []byte(inRoot)); k, v = c.Next() {
+		//for k, v := c.First(); k != nil; k, v = c.Next() {
 			var tempObj = &tempUploadInfo{}
 			err = json.Unmarshal(v, tempObj)
 			if err != nil {
@@ -793,8 +807,8 @@ func (b *Persistent) getPendingUpload(waitTime time.Duration) (destPath string, 
 	return destPath, err
 }
 
-// searchPendingUpload returns the file info from the pending queue of uploads
-func (b *Persistent) searchPendingUpload(remote string) (started bool, err error) {
+// SearchPendingUpload returns the file info from the pending queue of uploads
+func (b *Persistent) SearchPendingUpload(remote string) (started bool, err error) {
 	err = b.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(tempBucket))
 		if bucket == nil {
@@ -841,6 +855,34 @@ func (b *Persistent) searchPendingUploadFromDir(dir string) (remotes []string, e
 	})
 
 	return remotes, err
+}
+
+func (b *Persistent) rollbackPendingUpload(remote string) error {
+	b.tempQueueMux.Lock()
+	defer b.tempQueueMux.Unlock()
+
+	return b.db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(tempBucket))
+		if err != nil {
+			return errors.Errorf("couldn't bucket for %v", tempBucket)
+		}
+		var tempObj = &tempUploadInfo{}
+		v := bucket.Get([]byte(remote))
+		err = json.Unmarshal(v, tempObj)
+		if err != nil {
+			return errors.Errorf("pending upload (%v) not found %v", remote, err)
+		}
+		tempObj.Started = false
+		v2, err := json.Marshal(tempObj)
+		if err != nil {
+			return errors.Errorf("pending upload not updated %v", err)
+		}
+		err = bucket.Put([]byte(tempObj.DestPath), v2)
+		if err != nil {
+			return errors.Errorf("pending upload not updated %v", err)
+		}
+		return nil
+	})
 }
 
 func (b *Persistent) removePendingUpload(remote string) error {
@@ -909,6 +951,53 @@ func (b *Persistent) updatePendingUpload(remote string, fn func(item *tempUpload
 func (b *Persistent) SetPendingUploadToStarted(remote string) error {
 	return b.updatePendingUpload(remote, func(item *tempUploadInfo) error {
 		item.Started = true
+		return nil
+	})
+}
+
+// ReconcileTempUploads will recursively look for all the files in the temp directory and add them to the queue
+func (b *Persistent) ReconcileTempUploads(cacheFs *Fs) error {
+	return b.db.Update(func(tx *bolt.Tx) error {
+		_ = tx.DeleteBucket([]byte(tempBucket))
+		bucket, err := tx.CreateBucketIfNotExists([]byte(tempBucket))
+		if err != nil {
+			return err
+		}
+
+		var queuedEntries []fs.Object
+		err = fs.Walk(cacheFs.tempFs, "", true, -1, func(path string, entries fs.DirEntries, err error) error {
+			for _, o := range entries {
+				if oo, ok := o.(fs.Object); ok {
+					queuedEntries = append(queuedEntries, oo)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		fs.Debugf(cacheFs, "reconciling temporary uploads")
+		for _, queuedEntry := range queuedEntries {
+			destPath := path.Join(cacheFs.Root(), queuedEntry.Remote())
+			tempObj := &tempUploadInfo{
+				DestPath: destPath,
+				AddedOn:  time.Now(),
+				Started:  false,
+			}
+
+			// cache Object Info
+			encoded, err := json.Marshal(tempObj)
+			if err != nil {
+				return errors.Errorf("couldn't marshal object (%v) info: %v", queuedEntry, err)
+			}
+			err = bucket.Put([]byte(destPath), []byte(encoded))
+			if err != nil {
+				return errors.Errorf("couldn't cache object (%v) info: %v", destPath, err)
+			}
+			fs.Debugf(cacheFs, "reconciled temporary upload: %v", destPath)
+		}
+
 		return nil
 	})
 }

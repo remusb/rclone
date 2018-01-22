@@ -18,7 +18,6 @@ import (
 
 	"github.com/ncw/rclone/crypt"
 	"github.com/ncw/rclone/fs"
-	"github.com/ncw/rclone/local"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	"golang.org/x/time/rate"
@@ -177,10 +176,11 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	if strings.HasPrefix(remote, name+":") {
 		return nil, errors.New("can't point cache remote at itself - check the value of the remote setting")
 	}
-	// Look for a file first
+	//
+	rpath = strings.TrimPrefix(rpath, "/")
 	remotePath := path.Join(remote, rpath)
 	wrappedFs, wrapErr := fs.NewFs(remotePath)
-	if wrapErr != fs.ErrorIsFile && wrapErr != nil {
+	if wrapErr != nil {
 		return nil, errors.Wrapf(wrapErr, "failed to make remote %q to wrap", remotePath)
 	}
 	fs.Debugf(name, "wrapped %v:%v at root %v", wrappedFs.Name(), wrappedFs.Root(), rpath)
@@ -273,18 +273,6 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 		}
 	}
 
-	if f.tempWritePath != "" {
-		err = os.MkdirAll(f.tempWritePath, os.ModePerm)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to create cache directory %v", f.tempWritePath)
-		}
-		f.tempFs, err = local.NewFs(name+"-"+"temp", f.tempWritePath)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to create temp fs: %v", err)
-		}
-		fs.Infof(name, "Upload Temp FS: %v", f.tempWritePath)
-		f.backgroundRunner, _ = initBackgroundUploader(f)
-	}
 	dbPath := *cacheDbPath
 	chunkPath := *cacheChunkPath
 	// if the dbPath is non default but the chunk path is default, we overwrite the last to follow the same one as dbPath
@@ -339,11 +327,26 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	fs.Infof(name, "Chunk Clean Interval: %v", f.chunkCleanInterval.String())
 	fs.Infof(name, "Workers: %v", f.totalWorkers)
 	fs.Infof(name, "File Age: %v", f.fileAge.String())
-	fs.Infof(name, "Cache Writes: %v", f.cacheWrites)
+	if f.cacheWrites {
+		fs.Infof(name, "Cache Writes: enabled", f.cacheWrites)
+	}
 
 	if f.tempWritePath != "" {
+		err = os.MkdirAll(f.tempWritePath, os.ModePerm)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to create cache directory %v", f.tempWritePath)
+		}
+		f.tempWritePath = filepath.ToSlash(f.tempWritePath)
+		f.tempFs, err = fs.NewFs(f.tempWritePath)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to create temp fs: %v", err)
+		}
+		fs.Infof(name, "Upload Temp Rest Time: %v", f.tempWriteWait.String())
+		fs.Infof(name, "Upload Temp FS: %v", f.tempWritePath)
+		f.backgroundRunner, _ = initBackgroundUploader(f)
 		go f.backgroundRunner.run()
 	}
+
 	go func() {
 		for {
 			time.Sleep(f.chunkCleanInterval)
@@ -353,7 +356,6 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 				return
 			default:
 				fs.Debugf(f, "starting cleanup")
-
 				f.CleanUpCache(false)
 			}
 		}
@@ -374,18 +376,27 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
 		DuplicateFiles:          false, // storage doesn't permit this
-		//Purge:                   f.Purge,
-		//Copy:                    f.Copy,
-		//Move:                    f.Move,
-		//DirMove:                 f.DirMove,
 		DirChangeNotify: nil,
-		//PutUnchecked:            f.PutUnchecked,
-		//PutStream:               f.PutStream,
-		//CleanUp:                 f.CleanUp,
-		//UnWrap:                  f.UnWrap,
-		//WrapFs:                  f.WrapFs,
-		//SetWrapper:              f.SetWrapper,
 	}).Fill(f).Mask(wrappedFs).WrapsFs(f, wrappedFs)
+	// override only those features that use a temp fs and it doesn't support them
+	if f.tempWritePath != "" {
+		if f.tempFs.Features().Copy == nil {
+			f.features.Copy = nil
+		}
+		if f.tempFs.Features().Move == nil {
+			f.features.Move = nil
+		}
+		if f.tempFs.Features().Move == nil {
+			f.features.Move = nil
+		}
+		if f.tempFs.Features().DirMove == nil {
+			f.features.DirMove = nil
+		}
+		if f.tempFs.Features().MergeDirs == nil {
+			f.features.MergeDirs = nil
+		}
+	}
+	// even if the wrapped fs doesn't support it, we still want it
 	f.features.DirCacheFlush = f.DirCacheFlush
 
 	return f, wrapErr
@@ -408,12 +419,22 @@ func (f *Fs) Features() *fs.Features {
 
 // String returns a description of the FS
 func (f *Fs) String() string {
-	return fmt.Sprintf("%s:%s", f.name, f.root)
+	return fmt.Sprintf("Cache remote %s:%s", f.name, f.root)
 }
 
 // ChunkSize returns the configured chunk size
 func (f *Fs) ChunkSize() int64 {
 	return f.chunkSize
+}
+
+// InfoAge returns the configured file age
+func (f *Fs) InfoAge() time.Duration {
+	return f.fileAge
+}
+
+// TempUploadWaitTime returns the configured temp file upload wait time
+func (f *Fs) TempUploadWaitTime() time.Duration {
+	return f.tempWriteWait
 }
 
 // NewObject finds the Object at remote.
@@ -457,7 +478,7 @@ func (f *Fs) NewObject(remote string) (fs.Object, error) {
 
 	// cache the new entry
 	co = ObjectFromOriginal(f, obj).persist()
-	fs.Infof(co, "find: cached object")
+	fs.Debugf(co, "find: cached object")
 	return co, nil
 }
 
@@ -552,7 +573,7 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	if err != nil {
 		fs.Errorf(cd, "list: save error: '%v'", err)
 	} else {
-		fs.Debugf(dir, "list: cached dir: '%v', cache ts: %v", cd, cd.CacheTs)
+		fs.Debugf(dir, "list: cached dir: '%v', cache ts: %v", cd.abs(), cd.CacheTs)
 	}
 
 	return cachedEntries, nil
@@ -656,8 +677,19 @@ func (f *Fs) Rmdir(dir string) error {
 		f.backgroundRunner.pause()
 		defer f.backgroundRunner.play()
 
+		// we check if the source exists on the remote and make the same move on it too if it does
+		// otherwise, we skip this step
+		_, err := f.UnWrap().List(dir)
+		if err == nil {
+			err := f.Fs.Rmdir(dir)
+			if err != nil {
+				return err
+			}
+			fs.Debugf(dir, "rmdir: removed dir in source fs")
+		}
+
 		var queuedEntries []*Object
-		err := fs.Walk(f.tempFs, dir, true, -1, func(path string, entries fs.DirEntries, err error) error {
+		err = fs.Walk(f.tempFs, dir, true, -1, func(path string, entries fs.DirEntries, err error) error {
 			for _, o := range entries {
 				if oo, ok := o.(fs.Object); ok {
 					co := ObjectFromOriginal(f, oo)
@@ -672,21 +704,21 @@ func (f *Fs) Rmdir(dir string) error {
 			fs.Debugf(dir, "rmdir: read %v from temp fs", len(queuedEntries))
 			fs.Debugf(dir, "rmdir: temp fs entries: %v", queuedEntries)
 			if len(queuedEntries) > 0 {
-				fs.Errorf(dir, "rmdir: can't remove dir with files pending upload in it")
-				return errors.Errorf("%v: can't remove dir with files pending upload in it", dir)
+				fs.Errorf(dir, "rmdir: temporary dir not empty")
+				return fs.ErrorDirectoryNotEmpty
 			}
 		}
+	} else {
+		err := f.Fs.Rmdir(dir)
+		if err != nil {
+			return err
+		}
+		fs.Debugf(dir, "rmdir: removed dir in source fs")
 	}
-
-	err := f.Fs.Rmdir(dir)
-	if err != nil {
-		return err
-	}
-	fs.Debugf(dir, "rmdir: removed dir in source fs")
 
 	// remove dir data
 	d := NewDirectory(f, dir)
-	err = f.cache.RemoveDir(d.abs())
+	err := f.cache.RemoveDir(d.abs())
 	if err != nil {
 		fs.Errorf(dir, "rmdir: remove error: %v", err)
 	} else {
@@ -728,67 +760,61 @@ func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 		f.backgroundRunner.pause()
 		defer f.backgroundRunner.play()
 
+		// we check if the source exists on the remote and make the same move on it too if it does
+		// otherwise, we skip this step
+		_, err := srcFs.UnWrap().List(srcRemote)
+		if err == nil {
+			err := do(srcFs.UnWrap(), srcRemote, dstRemote)
+			if err != nil {
+				return err
+			}
+			fs.Debugf(srcRemote, "movedir: dir moved in the source fs")
+		}
+
 		var queuedEntries []*Object
-		err := fs.Walk(f.tempFs, srcRemote, true, -1, func(path string, entries fs.DirEntries, err error) error {
+		err = fs.Walk(f.tempFs, srcRemote, true, -1, func(path string, entries fs.DirEntries, err error) error {
 			for _, o := range entries {
 				if oo, ok := o.(fs.Object); ok {
 					co := ObjectFromOriginal(f, oo)
 					queuedEntries = append(queuedEntries, co)
+					if co.tempFileStartedUpload() {
+						fs.Errorf(co, "can't move - upload has already started. need to finish that")
+						return fs.ErrorCantDirMove
+					}
 				}
 			}
 			return nil
 		})
-		//queuedEntries, err := f.cache.SearchPendingUploadFromDir(path.Join(src.Root(), srcRemote))
 		if err != nil {
-			fs.Errorf(srcRemote, "dirmove: error getting pending uploads: %v", err)
-		} else {
-			fs.Debugf(srcRemote, "dirmove: read %v from temp fs", len(queuedEntries))
-			fs.Debugf(srcRemote, "dirmove: temp fs entries: %v", queuedEntries)
-			if len(queuedEntries) > 0 {
-				fs.Errorf(srcRemote, "dirmove: can't move dir with files pending upload in it")
-				return fs.ErrorCantDirMove
-			}
-
-			// TODO Work out to support dirs being moved with temp files in them
-			//for _, queuedEntry := range queuedEntries {
-			//	if queuedEntry.tempFileStartedUpload() {
-			//		fs.Errorf(queuedEntry, "file started upload, can not move its parent dir: %v", srcRemote)
-			//		return fs.ErrorCantDirMove
-			//	}
-			//}
-			//for _, queuedEntry := range queuedEntries {
-			//	f.tempFs.Features().Mo
-			//	// we must also update the pending queue
-			//	err := f.cache.UpdatePendingUpload(queuedEntry.abs(), func(item *tempUploadInfo) error {
-			//		item.DestPath = path.Join(f.Root(), remote)
-			//		item.AddedOn = time.Now()
-			//		return nil
-			//	})
-			//	if err != nil {
-			//		fs.Errorf(srcObj, "failed to rename queued file for upload: %v", err)
-			//		return nil, fs.ErrorCantMove
-			//	} else {
-			//		fs.Debugf(srcObj, "move: queued file moved to %v", remote)
-			//	}
-			//}
+			return err
 		}
+		fs.Debugf(srcRemote, "dirmove: read %v from temp fs", len(queuedEntries))
+		fs.Debugf(srcRemote, "dirmove: temp fs entries: %v", queuedEntries)
 
-		//do = srcObj.ParentFs.Features().Copy
-		//if do == nil {
-		//	fs.Errorf(src, "parent remote (%v) doesn't support Copy", srcObj.ParentFs)
-		//	return nil, fs.ErrorCantCopy
-		//}
+		do := f.tempFs.Features().DirMove
+		if do == nil {
+			fs.Errorf(srcRemote, "dirmove: can't move dir in temp fs")
+			return fs.ErrorCantDirMove
+		}
+		err = do(f.tempFs, srcRemote, dstRemote)
+		if err != nil {
+			return err
+		}
+		err = f.cache.ReconcileTempUploads(f)
+		if err != nil {
+			return err
+		}
+	} else {
+		err := do(srcFs.UnWrap(), srcRemote, dstRemote)
+		if err != nil {
+			return err
+		}
+		fs.Debugf(srcRemote, "movedir: dir moved in the source fs")
 	}
-
-	err := do(srcFs.UnWrap(), srcRemote, dstRemote)
-	if err != nil {
-		return err
-	}
-	fs.Debugf(srcRemote, "movedir: dir moved in the source fs")
 
 	// delete src dir from cache along with all chunks
 	srcDir := NewDirectory(srcFs, srcRemote)
-	err = f.cache.RemoveDir(srcDir.abs())
+	err := f.cache.RemoveDir(srcDir.abs())
 	if err != nil {
 		fs.Errorf(srcDir, "dirmove: remove error: %v", err)
 	} else {
@@ -894,13 +920,13 @@ func (f *Fs) put(in io.Reader, src fs.ObjectInfo, options []fs.OpenOption, put p
 			fs.Errorf(obj, "put: failed to upload in temp fs: %v", err)
 			return nil, err
 		}
-		fs.Debugf(obj, "put: uploaded in temp fs")
+		fs.Infof(obj, "put: uploaded in temp fs")
 		err = f.cache.addPendingUpload(path.Join(f.Root(), src.Remote()), false)
 		if err != nil {
 			fs.Errorf(obj, "put: failed to queue for upload: %v", err)
 			return nil, err
 		}
-		fs.Debugf(obj, "put: queued for upload")
+		fs.Infof(obj, "put: queued for upload")
 		// if cache writes is enabled write it first through cache
 	} else if f.cacheWrites {
 		f.cacheReader(in, src, func(inn io.Reader) {
@@ -984,7 +1010,7 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 		return nil, fs.ErrorCantCopy
 	}
 	// refresh from source or abort
-	if err := srcObj.refreshFromSource(); err != nil {
+	if err := srcObj.refreshFromSource(false); err != nil {
 		fs.Errorf(f, "can't copy %v - %v", src, err)
 		return nil, fs.ErrorCantCopy
 	}
@@ -1055,7 +1081,7 @@ func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 		return nil, fs.ErrorCantMove
 	}
 	// refresh from source or abort
-	if err := srcObj.refreshFromSource(); err != nil {
+	if err := srcObj.refreshFromSource(false); err != nil {
 		fs.Errorf(f, "can't move %v - %v", src, err)
 		return nil, fs.ErrorCantMove
 	}
@@ -1205,6 +1231,7 @@ func (f *Fs) StopBackgroundRunners() {
 		f.backgroundRunner.close()
 	}
 	f.cache.Close()
+	fs.Debugf(f, "Services stopped")
 }
 
 // UnWrap returns the Fs that this Fs is wrapping
@@ -1253,6 +1280,15 @@ func (f *Fs) isRootInPath(p string) bool {
 // DirCacheFlush flushes the dir cache
 func (f *Fs) DirCacheFlush() {
 	_ = f.cache.RemoveDir("")
+}
+
+// GetBackgroundUploadChannel returns a channel that can be listened to for remote activities that happen
+// in the background
+func (f *Fs) GetBackgroundUploadChannel() chan BackgroundUploadState {
+	if f.tempWritePath != "" {
+		return f.backgroundRunner.notifyCh
+	}
+	return nil
 }
 
 func cleanPath(p string) string {

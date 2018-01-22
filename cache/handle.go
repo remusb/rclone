@@ -104,7 +104,7 @@ func (r *Handle) startReadWorkers() {
 		if !r.cacheFs().plexConnector.isConnected() {
 			err := r.cacheFs().plexConnector.authenticate()
 			if err != nil {
-				fs.Infof(r, "failed to authenticate to Plex: %v", err)
+				fs.Errorf(r, "failed to authenticate to Plex: %v", err)
 			}
 		}
 		if r.cacheFs().plexConnector.isConnected() {
@@ -141,7 +141,7 @@ func (r *Handle) scaleWorkers(desired int) {
 	}
 	// ignore first scale out from 0
 	if current != 0 {
-		fs.Infof(r, "scale workers to %v", desired)
+		fs.Debugf(r, "scale workers to %v", desired)
 	}
 }
 
@@ -383,10 +383,10 @@ func (w *worker) String() string {
 //   - if it supports seeking it will seek to the desired offset and return the same reader
 //   - if it doesn't support seeking it will close a possible existing one and open at the desired offset
 //   - if there's no reader associated with this worker, it will create one
-func (w *worker) reader(offset, end int64) (io.ReadCloser, error) {
+func (w *worker) reader(offset, end int64, closeOpen bool) (io.ReadCloser, error) {
 	var err error
 	r := w.rc
-	if w.rc == nil {
+	if w.rc == nil  {
 		r, err = w.r.cacheFs().openRateLimited(func() (io.ReadCloser, error) {
 			return w.r.cachedObject.Object.Open(&fs.SeekOption{Offset: offset}, &fs.RangeOption{Start: offset, End: end})
 		})
@@ -396,10 +396,12 @@ func (w *worker) reader(offset, end int64) (io.ReadCloser, error) {
 		return r, nil
 	}
 
-	seekerObj, ok := r.(io.Seeker)
-	if ok {
-		_, err = seekerObj.Seek(offset, os.SEEK_SET)
-		return r, err
+	if !closeOpen {
+		seekerObj, ok := r.(io.Seeker)
+		if ok {
+			_, err = seekerObj.Seek(offset, os.SEEK_SET)
+			return r, err
+		}
 	}
 
 	_ = w.rc.Close()
@@ -489,10 +491,15 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 		time.Sleep(time.Second * time.Duration(retry))
 	}
 
-	w.rc, err = w.reader(chunkStart, chunkEnd)
+	closeOpen := false
+	if retry > 0 {
+		closeOpen = true
+	}
+	w.rc, err = w.reader(chunkStart, chunkEnd, closeOpen)
 	// we seem to be getting only errors so we abort
 	if err != nil {
 		fs.Errorf(w, "object open failed %v: %v", chunkStart, err)
+		w.r.cachedObject.refreshFromSource(true)
 		w.download(chunkStart, chunkEnd, retry+1)
 		return
 	}
@@ -502,6 +509,7 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	sourceRead, err = io.ReadFull(w.rc, data)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		fs.Errorf(w, "failed to read chunk %v: %v", chunkStart, err)
+		w.r.cachedObject.refreshFromSource(true)
 		w.download(chunkStart, chunkEnd, retry+1)
 		return
 	}
@@ -509,7 +517,7 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	if err == io.ErrUnexpectedEOF {
 		fs.Debugf(w, "partial downloaded chunk %v", fs.SizeSuffix(chunkStart))
 	} else {
-		fs.Debugf(w, "downloaded chunk %v", fs.SizeSuffix(chunkStart))
+		fs.Debugf(w, "downloaded chunk %v", chunkStart)
 	}
 
 	if w.r.UseMemory {
@@ -525,16 +533,30 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	}
 }
 
+const(
+	BackgroundUploadStarted = iota
+	BackgroundUploadCompleted
+	BackgroundUploadError
+)
+
+type BackgroundUploadState struct {
+	Remote string
+	Status int
+	Error error
+}
+
 type backgroundWriter struct {
 	fs      *Fs
 	stateCh chan int
 	running bool
+	notifyCh chan BackgroundUploadState
 }
 
 func newBackgroundWriter(f *Fs) *backgroundWriter {
 	b := &backgroundWriter{
 		fs:      f,
 		stateCh: make(chan int),
+		notifyCh: make(chan BackgroundUploadState),
 	}
 
 	return b
@@ -552,6 +574,19 @@ func (b *backgroundWriter) play() {
 	b.stateCh <- 0
 }
 
+func (b *backgroundWriter) notify(remote string, status int, err error) {
+	state := BackgroundUploadState{
+		Remote: remote,
+		Status: status,
+		Error: err,
+	}
+	select {
+	case b.notifyCh <- state:
+		fs.Debugf(remote, "notified background upload state: %v", state.Status)
+	default:
+	}
+}
+
 func (b *backgroundWriter) run() {
 	state := 0
 	for {
@@ -560,48 +595,46 @@ func (b *backgroundWriter) run() {
 		case s := <-b.stateCh:
 			state = s
 		default:
-			switch state {
-			case 1:
-				runtime.Gosched()
-				time.Sleep(time.Millisecond * 500)
-				continue
-			case 2:
-				b.running = false
-				return
-			}
+			//
+		}
+		switch state {
+		case 1:
+			runtime.Gosched()
+			time.Sleep(time.Millisecond * 500)
+			continue
+		case 2:
+			b.running = false
+			return
 		}
 
-		absPath, err := b.fs.cache.getPendingUpload(b.fs.tempWriteWait)
+		absPath, err := b.fs.cache.getPendingUpload(b.fs.Root(), b.fs.tempWriteWait)
 		if err != nil || absPath == "" || !b.fs.isRootInPath(absPath) {
 			time.Sleep(time.Second)
 			continue
 		}
 
 		remote := b.fs.cleanRootFromPath(absPath)
+		b.notify(remote, BackgroundUploadStarted, nil)
+		fs.Infof(remote, "background upload: started upload")
 		err = fs.MoveFile(b.fs.UnWrap(), b.fs.tempFs, remote, remote)
 		if err != nil {
+			b.notify(remote, BackgroundUploadError, err)
+			_ = b.fs.cache.rollbackPendingUpload(absPath)
 			fs.Errorf(remote, "background upload: %v", err)
 			continue
-		} else {
-			fs.Infof(remote, "background upload: uploaded entry")
 		}
+		fs.Infof(remote, "background upload: uploaded entry")
 		err = b.fs.cache.removePendingUpload(absPath)
 		if err != nil && !strings.Contains(err.Error(), "pending upload not found") {
 			fs.Errorf(remote, "background upload: %v", err)
-		}
-		err = b.fs.cache.RemoveObject(absPath)
-		if err != nil {
-			fs.Errorf(remote, "background upload: remove error: %v", err)
-		} else {
-			fs.Debugf(remote, "background upload: removed from cache")
 		}
 		parentCd := NewDirectory(b.fs, cleanPath(path.Dir(remote)))
 		err = b.fs.cache.ExpireDir(parentCd)
 		if err != nil {
 			fs.Errorf(parentCd, "background upload: cache expire error: %v", err)
-		} else {
-			fs.Infof(parentCd, "background upload: cache expired")
 		}
+		fs.Infof(remote, "finished background upload")
+		b.notify(remote, BackgroundUploadCompleted, nil)
 	}
 }
 
