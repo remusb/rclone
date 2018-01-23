@@ -176,14 +176,18 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	if strings.HasPrefix(remote, name+":") {
 		return nil, errors.New("can't point cache remote at itself - check the value of the remote setting")
 	}
-	//
-	rpath = strings.TrimPrefix(rpath, "/")
+	rpath = strings.Trim(rpath, "/")
 	remotePath := path.Join(remote, rpath)
 	wrappedFs, wrapErr := fs.NewFs(remotePath)
-	if wrapErr != nil {
+	if wrapErr != nil && wrapErr != fs.ErrorIsFile {
 		return nil, errors.Wrapf(wrapErr, "failed to make remote %q to wrap", remotePath)
 	}
+	var fsErr error
 	fs.Debugf(name, "wrapped %v:%v at root %v", wrappedFs.Name(), wrappedFs.Root(), rpath)
+	if wrapErr == fs.ErrorIsFile {
+		fsErr = fs.ErrorIsFile
+		rpath = cleanPath(path.Dir(rpath))
+	}
 
 	plexURL := fs.ConfigFileGet(name, "plex_url")
 	plexToken := fs.ConfigFileGet(name, "plex_token")
@@ -328,7 +332,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	fs.Infof(name, "Workers: %v", f.totalWorkers)
 	fs.Infof(name, "File Age: %v", f.fileAge.String())
 	if f.cacheWrites {
-		fs.Infof(name, "Cache Writes: enabled", f.cacheWrites)
+		fs.Infof(name, "Cache Writes: enabled")
 	}
 
 	if f.tempWritePath != "" {
@@ -376,7 +380,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
 		DuplicateFiles:          false, // storage doesn't permit this
-		DirChangeNotify: nil,
+		DirChangeNotify:         nil,
 	}).Fill(f).Mask(wrappedFs).WrapsFs(f, wrappedFs)
 	// override only those features that use a temp fs and it doesn't support them
 	if f.tempWritePath != "" {
@@ -399,7 +403,7 @@ func NewFs(name, rpath string) (fs.Fs, error) {
 	// even if the wrapped fs doesn't support it, we still want it
 	f.features.DirCacheFlush = f.DirCacheFlush
 
-	return f, wrapErr
+	return f, fsErr
 }
 
 // Name of the remote (as passed into NewFs)

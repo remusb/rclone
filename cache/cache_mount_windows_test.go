@@ -3,16 +3,17 @@
 package cache_test
 
 import (
-	"github.com/stretchr/testify/require"
-	"time"
+	"fmt"
 	"os"
+	"testing"
+	"time"
+
 	"github.com/billziss-gh/cgofuse/fuse"
-	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/cmd/cmount"
 	"github.com/ncw/rclone/cmd/mountlib"
+	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
-	"testing"
-	"fmt"
+	"github.com/stretchr/testify/require"
 )
 
 // waitFor runs fn() until it returns true or the timeout expires
@@ -33,7 +34,7 @@ func (r *run) mountFs(t *testing.T, f fs.Fs) {
 	// FIXME implement cmount
 	t.Skip("windows not supported yet")
 
-	device := f.Name()+":"+f.Root()
+	device := f.Name() + ":" + f.Root()
 	options := []string{
 		"-o", "fsname=" + device,
 		"-o", "subtype=rclone",
@@ -84,7 +85,7 @@ func (r *run) mountFs(t *testing.T, f fs.Fs) {
 	select {
 	case err := <-r.unmountRes:
 		require.NoError(t, err)
-	case <-time.After(time.Second*3):
+	case <-time.After(time.Second * 3):
 	}
 
 	// Wait for the mount point to be available on Windows

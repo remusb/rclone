@@ -16,10 +16,11 @@ import (
 
 	"io/ioutil"
 
+	"fmt"
+
 	bolt "github.com/coreos/bbolt"
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
-	"fmt"
 )
 
 // Constants
@@ -773,7 +774,7 @@ func (b *Persistent) getPendingUpload(inRoot string, waitTime time.Duration) (de
 
 		c := bucket.Cursor()
 		for k, v := c.Seek([]byte(inRoot)); k != nil && bytes.HasPrefix(k, []byte(inRoot)); k, v = c.Next() {
-		//for k, v := c.First(); k != nil; k, v = c.Next() {
+			//for k, v := c.First(); k != nil; k, v = c.Next() {
 			var tempObj = &tempUploadInfo{}
 			err = json.Unmarshal(v, tempObj)
 			if err != nil {

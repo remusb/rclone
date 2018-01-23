@@ -386,7 +386,7 @@ func (w *worker) String() string {
 func (w *worker) reader(offset, end int64, closeOpen bool) (io.ReadCloser, error) {
 	var err error
 	r := w.rc
-	if w.rc == nil  {
+	if w.rc == nil {
 		r, err = w.r.cacheFs().openRateLimited(func() (io.ReadCloser, error) {
 			return w.r.cachedObject.Object.Open(&fs.SeekOption{Offset: offset}, &fs.RangeOption{Start: offset, End: end})
 		})
@@ -499,7 +499,10 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	// we seem to be getting only errors so we abort
 	if err != nil {
 		fs.Errorf(w, "object open failed %v: %v", chunkStart, err)
-		w.r.cachedObject.refreshFromSource(true)
+		err = w.r.cachedObject.refreshFromSource(true)
+		if err != nil {
+			fs.Errorf(w, "%v", err)
+		}
 		w.download(chunkStart, chunkEnd, retry+1)
 		return
 	}
@@ -509,7 +512,10 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	sourceRead, err = io.ReadFull(w.rc, data)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		fs.Errorf(w, "failed to read chunk %v: %v", chunkStart, err)
-		w.r.cachedObject.refreshFromSource(true)
+		err = w.r.cachedObject.refreshFromSource(true)
+		if err != nil {
+			fs.Errorf(w, "%v", err)
+		}
 		w.download(chunkStart, chunkEnd, retry+1)
 		return
 	}
@@ -533,29 +539,33 @@ func (w *worker) download(chunkStart, chunkEnd int64, retry int) {
 	}
 }
 
-const(
+const (
+	// BackgroundUploadStarted is a state for a temp file that has started upload
 	BackgroundUploadStarted = iota
+	// BackgroundUploadCompleted is a state for a temp file that has completed upload
 	BackgroundUploadCompleted
+	// BackgroundUploadError is a state for a temp file that has an error upload
 	BackgroundUploadError
 )
 
+// BackgroundUploadState is an entity that maps to an existing file which is stored on the temp fs
 type BackgroundUploadState struct {
 	Remote string
 	Status int
-	Error error
+	Error  error
 }
 
 type backgroundWriter struct {
-	fs      *Fs
-	stateCh chan int
-	running bool
+	fs       *Fs
+	stateCh  chan int
+	running  bool
 	notifyCh chan BackgroundUploadState
 }
 
 func newBackgroundWriter(f *Fs) *backgroundWriter {
 	b := &backgroundWriter{
-		fs:      f,
-		stateCh: make(chan int),
+		fs:       f,
+		stateCh:  make(chan int),
 		notifyCh: make(chan BackgroundUploadState),
 	}
 
@@ -578,7 +588,7 @@ func (b *backgroundWriter) notify(remote string, status int, err error) {
 	state := BackgroundUploadState{
 		Remote: remote,
 		Status: status,
-		Error: err,
+		Error:  err,
 	}
 	select {
 	case b.notifyCh <- state:

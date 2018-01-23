@@ -3,19 +3,20 @@
 package cache_test
 
 import (
-	"github.com/stretchr/testify/require"
-	"time"
 	"os"
+	"testing"
+	"time"
+
 	"bazil.org/fuse"
 	fusefs "bazil.org/fuse/fs"
-	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/cmd/mount"
 	"github.com/ncw/rclone/cmd/mountlib"
-	"testing"
+	"github.com/ncw/rclone/fs"
+	"github.com/stretchr/testify/require"
 )
 
 func (r *run) mountFs(t *testing.T, f fs.Fs) {
-	device := f.Name()+":"+f.Root()
+	device := f.Name() + ":" + f.Root()
 	var options = []fuse.MountOption{
 		fuse.MaxReadahead(uint32(mountlib.MaxReadAhead)),
 		fuse.Subtype("rclone"),

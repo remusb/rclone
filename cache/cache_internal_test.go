@@ -4,75 +4,77 @@ package cache_test
 
 import (
 	"bytes"
-	"github.com/pkg/errors"
 	"io"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-	"runtime"
-	"log"
 
-	flag "github.com/spf13/pflag"
+	"github.com/pkg/errors"
+
+	"encoding/base64"
 	goflag "flag"
+	"fmt"
+	"runtime/debug"
+
 	"github.com/ncw/rclone/cache"
+	"github.com/ncw/rclone/crypt"
 	_ "github.com/ncw/rclone/drive"
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fstest"
 	"github.com/ncw/rclone/local"
-	"github.com/stretchr/testify/require"
 	"github.com/ncw/rclone/vfs"
 	"github.com/ncw/rclone/vfs/vfsflags"
-	"github.com/ncw/rclone/crypt"
-	"runtime/debug"
-	"encoding/base64"
-	"fmt"
+	flag "github.com/spf13/pflag"
+	"github.com/stretchr/testify/require"
 )
 
-const(
+const (
 	// these 2 passwords are test random
-	cryptPassword1 = "3XcvMMdsV3d-HGAReTMdNH-5FcX5q32_lUeA" // oGJdUbQc7s8
-	cryptPassword2 = "NlgTBEIe-qibA7v-FoMfuX6Cw8KlLai_aMvV" // mv4mZW572HM
-	cryptedTextBase64 = "UkNMT05FAAC320i2xIee0BiNyknSPBn+Qcw3q9FhIFp3tvq6qlqvbsno3PnxmEFeJG3jDBnR/wku2gHWeQ==" // one content
+	cryptPassword1     = "3XcvMMdsV3d-HGAReTMdNH-5FcX5q32_lUeA"                                                     // oGJdUbQc7s8
+	cryptPassword2     = "NlgTBEIe-qibA7v-FoMfuX6Cw8KlLai_aMvV"                                                     // mv4mZW572HM
+	cryptedTextBase64  = "UkNMT05FAAC320i2xIee0BiNyknSPBn+Qcw3q9FhIFp3tvq6qlqvbsno3PnxmEFeJG3jDBnR/wku2gHWeQ=="     // one content
 	cryptedText2Base64 = "UkNMT05FAAATcQkVsgjBh8KafCKcr0wdTa1fMmV0U8hsCLGFoqcvxKVmvv7wx3Hf5EXxFcki2FFV4sdpmSrb9Q==" // updated content
 )
 
 var (
-	remoteName string
-	mountDir string
-	uploadDir string
-	useMount bool
-	runInstance *run
-	errNotSupported = errors.New("not supported")
-	decryptedToEncryptedRemotes = map[string]string {
-		"one": "lm4u7jjt3c85bf56vjqgeenuno",
-		"second": "qvt1ochrkcfbptp5mu9ugb2l14",
-		"test": "jn4tegjtpqro30t3o11thb4b5s",
-		"test2": "qakvqnh8ttei89e0gc76crpql4",
-		"data.bin": "0q2847tfko6mhj3dag3r809qbc",
-		"ticw/data.bin": "5mv97b0ule6pht33srae5pice8/0q2847tfko6mhj3dag3r809qbc",
-		"tiutfo/test/one": "legd371aa8ol36tjfklt347qnc/jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
-		"tiuufo/test/one": "vi6u1olqhirqv14cd8qlej1mgo/jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
+	remoteName                  string
+	mountDir                    string
+	uploadDir                   string
+	useMount                    bool
+	runInstance                 *run
+	errNotSupported             = errors.New("not supported")
+	decryptedToEncryptedRemotes = map[string]string{
+		"one":               "lm4u7jjt3c85bf56vjqgeenuno",
+		"second":            "qvt1ochrkcfbptp5mu9ugb2l14",
+		"test":              "jn4tegjtpqro30t3o11thb4b5s",
+		"test2":             "qakvqnh8ttei89e0gc76crpql4",
+		"data.bin":          "0q2847tfko6mhj3dag3r809qbc",
+		"ticw/data.bin":     "5mv97b0ule6pht33srae5pice8/0q2847tfko6mhj3dag3r809qbc",
+		"tiutfo/test/one":   "legd371aa8ol36tjfklt347qnc/jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
+		"tiuufo/test/one":   "vi6u1olqhirqv14cd8qlej1mgo/jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
 		"tiutfo/second/one": "legd371aa8ol36tjfklt347qnc/qvt1ochrkcfbptp5mu9ugb2l14/lm4u7jjt3c85bf56vjqgeenuno",
-		"second/one": "qvt1ochrkcfbptp5mu9ugb2l14/lm4u7jjt3c85bf56vjqgeenuno",
-		"test/one": "jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
-		"test/second": "jn4tegjtpqro30t3o11thb4b5s/qvt1ochrkcfbptp5mu9ugb2l14",
-		"test/third": "jn4tegjtpqro30t3o11thb4b5s/2nd7fjiop5h3ihfj1vl953aa5g",
-		"test/0.bin": "jn4tegjtpqro30t3o11thb4b5s/e6frddt058b6kvbpmlstlndmtk",
-		"test/1.bin": "jn4tegjtpqro30t3o11thb4b5s/kck472nt1k7qbmob0mt1p1crgc",
-		"test/2.bin": "jn4tegjtpqro30t3o11thb4b5s/744oe9ven2rmak4u27if51qk24",
-		"test/3.bin": "jn4tegjtpqro30t3o11thb4b5s/2bjd8kef0u5lmsu6qhqll34bcs",
-		"test/4.bin": "jn4tegjtpqro30t3o11thb4b5s/cvjs73iv0a82v0c7r67avllh7s",
-		"test/5.bin": "jn4tegjtpqro30t3o11thb4b5s/0plkdo790b6bnmt33qsdqmhv9c",
-		"test/6.bin": "jn4tegjtpqro30t3o11thb4b5s/s5r633srnjtbh83893jovjt5d0",
-		"test/7.bin": "jn4tegjtpqro30t3o11thb4b5s/6rq45tr9bjsammku622flmqsu4",
-		"test/8.bin": "jn4tegjtpqro30t3o11thb4b5s/37bc6tcl3e31qb8cadvjb749vk",
-		"test/9.bin": "jn4tegjtpqro30t3o11thb4b5s/t4pr35hnls32789o8fk0chk1ec",
+		"second/one":        "qvt1ochrkcfbptp5mu9ugb2l14/lm4u7jjt3c85bf56vjqgeenuno",
+		"test/one":          "jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
+		"test/second":       "jn4tegjtpqro30t3o11thb4b5s/qvt1ochrkcfbptp5mu9ugb2l14",
+		"test/third":        "jn4tegjtpqro30t3o11thb4b5s/2nd7fjiop5h3ihfj1vl953aa5g",
+		"test/0.bin":        "jn4tegjtpqro30t3o11thb4b5s/e6frddt058b6kvbpmlstlndmtk",
+		"test/1.bin":        "jn4tegjtpqro30t3o11thb4b5s/kck472nt1k7qbmob0mt1p1crgc",
+		"test/2.bin":        "jn4tegjtpqro30t3o11thb4b5s/744oe9ven2rmak4u27if51qk24",
+		"test/3.bin":        "jn4tegjtpqro30t3o11thb4b5s/2bjd8kef0u5lmsu6qhqll34bcs",
+		"test/4.bin":        "jn4tegjtpqro30t3o11thb4b5s/cvjs73iv0a82v0c7r67avllh7s",
+		"test/5.bin":        "jn4tegjtpqro30t3o11thb4b5s/0plkdo790b6bnmt33qsdqmhv9c",
+		"test/6.bin":        "jn4tegjtpqro30t3o11thb4b5s/s5r633srnjtbh83893jovjt5d0",
+		"test/7.bin":        "jn4tegjtpqro30t3o11thb4b5s/6rq45tr9bjsammku622flmqsu4",
+		"test/8.bin":        "jn4tegjtpqro30t3o11thb4b5s/37bc6tcl3e31qb8cadvjb749vk",
+		"test/9.bin":        "jn4tegjtpqro30t3o11thb4b5s/t4pr35hnls32789o8fk0chk1ec",
 	}
 )
 
@@ -193,7 +195,7 @@ func TestInternalCachedWrittenContentMatches(t *testing.T) {
 	chunkSize := cfs.ChunkSize()
 
 	// create some rand test data
-	testData := runInstance.randomBytes(t, chunkSize*4 + chunkSize/2)
+	testData := runInstance.randomBytes(t, chunkSize*4+chunkSize/2)
 
 	// write the object
 	runInstance.writeRemoteBytes(t, rootFs, "data.bin", testData)
@@ -288,7 +290,7 @@ func TestInternalLargeWrittenContentMatches(t *testing.T) {
 
 	// write the object
 	runInstance.writeObjectBytes(t, cfs.UnWrap(), "data.bin", testData)
-	time.Sleep(time.Second*5)
+	time.Sleep(time.Second * 5)
 	readData := runInstance.readDataFromRemote(t, rootFs, "data.bin", 0, testSize, false)
 
 	for i := 0; i < len(readData); i++ {
@@ -430,14 +432,14 @@ func TestInternalExpiredEntriesRemoved(t *testing.T) {
 	l = runInstance.list(t, rootFs, "test")
 	require.Len(t, l, 1)
 
-	runInstance.retryBlock(func() error {
+	err = runInstance.retryBlock(func() error {
 		l = runInstance.list(t, rootFs, "test")
 		if len(l) != 2 {
 			return errors.New("list is not 2")
 		}
 		return nil
 	}, 10, time.Second)
-	require.Len(t, l, 2)
+	require.NoError(t, err)
 }
 
 func TestInternalUploadTempDirCreated(t *testing.T) {
@@ -848,28 +850,28 @@ func TestInternalUploadUploadingFileOperations(t *testing.T) {
 
 // run holds the remotes for a test run
 type run struct {
-	okDiff time.Duration
-	allCfgMap map[string]string
-	allFlagMap map[string]string
-	runDefaultCfgMap map[string]string
+	okDiff            time.Duration
+	allCfgMap         map[string]string
+	allFlagMap        map[string]string
+	runDefaultCfgMap  map[string]string
 	runDefaultFlagMap map[string]string
-	mntDir string
-	tmpUploadDir string
-	useMount bool
-	isMounted bool
-	rootIsCrypt bool
+	mntDir            string
+	tmpUploadDir      string
+	useMount          bool
+	isMounted         bool
+	rootIsCrypt       bool
 	wrappedIsExternal bool
-	unmountFn func() error
-	unmountRes chan error
-	vfs *vfs.VFS
-	tempFiles []*os.File
+	unmountFn         func() error
+	unmountRes        chan error
+	vfs               *vfs.VFS
+	tempFiles         []*os.File
 }
 
 func newRun() *run {
 	var err error
 	r := &run{
-		okDiff: time.Second * 9, // really big diff here but the build machines seem to be slow. need a different way for this
-		useMount: useMount,
+		okDiff:    time.Second * 9, // really big diff here but the build machines seem to be slow. need a different way for this
+		useMount:  useMount,
 		isMounted: false,
 	}
 
@@ -923,7 +925,7 @@ func newRun() *run {
 				}
 			}
 			log.Print("Couldn't find free drive letter for test")
-			found:
+		found:
 			r.mntDir = drive
 		}
 	} else {
@@ -1105,11 +1107,11 @@ func (r *run) randomReader(t *testing.T, size int64) io.ReadCloser {
 
 	for i := 0; i < int(cnt); i++ {
 		data := r.randomBytes(t, chunk)
-		f.Write(data)
+		_, _ = f.Write(data)
 	}
 	data := r.randomBytes(t, int64(left))
-	f.Write(data)
-	f.Seek(int64(0), 0)
+	_, _ = f.Write(data)
+	_, _ = f.Seek(int64(0), 0)
 	r.tempFiles = append(r.tempFiles, f)
 
 	return f
@@ -1146,7 +1148,7 @@ func (r *run) writeRemoteBytes(t *testing.T, f fs.Fs, remote string, data []byte
 	if r.useMount {
 		err = r.retryBlock(func() error {
 			return ioutil.WriteFile(path.Join(r.mntDir, remote), data, 0600)
-		}, 3, time.Second * 3)
+		}, 3, time.Second*3)
 		require.NoError(t, err)
 		r.vfs.WaitForWriters(10 * time.Second)
 	} else {
@@ -1155,12 +1157,16 @@ func (r *run) writeRemoteBytes(t *testing.T, f fs.Fs, remote string, data []byte
 }
 
 func (r *run) writeRemoteReader(t *testing.T, f fs.Fs, remote string, in io.ReadCloser) {
-	defer in.Close()
+	defer func() {
+		_ = in.Close()
+	}()
 
 	if r.useMount {
 		out, err := os.Create(path.Join(r.mntDir, remote))
 		require.NoError(t, err)
-		defer out.Close()
+		defer func() {
+			_ = out.Close()
+		}()
 
 		_, err = io.Copy(out, in)
 		require.NoError(t, err)
@@ -1183,7 +1189,7 @@ func (r *run) writeObjectReader(t *testing.T, f fs.Fs, remote string, in io.Read
 	if r.useMount {
 		r.vfs.WaitForWriters(10 * time.Second)
 	}
-	
+
 	return obj
 }
 
@@ -1222,9 +1228,11 @@ func (r *run) readDataFromRemote(t *testing.T, f fs.Fs, remote string, offset, e
 
 	if r.useMount {
 		f, err := os.Open(path.Join(r.mntDir, remote))
-		defer f.Close()
+		defer func() {
+			_ = f.Close()
+		}()
 		require.NoError(t, err)
-		f.Seek(offset, 0)
+		_, _ = f.Seek(offset, 0)
 		totalRead, err := io.ReadFull(f, checkSample)
 		require.NoError(t, err)
 		checkSample = checkSample[:totalRead]
@@ -1314,13 +1322,17 @@ func (r *run) copyFile(t *testing.T, f fs.Fs, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() {
+		_ = in.Close()
+	}()
 
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		_ = out.Close()
+	}()
 
 	_, err = io.Copy(out, in)
 	return err
@@ -1409,15 +1421,12 @@ func (r *run) modTime(t *testing.T, rootFs fs.Fs, src string) (time.Time, error)
 			return time.Time{}, err
 		}
 		return fi.ModTime(), nil
-	} else {
-		obj1, err := rootFs.NewObject(src)
-		if err != nil {
-			return time.Time{}, err
-		}
-		return obj1.ModTime(), nil
 	}
-
-	return time.Time{}, err
+	obj1, err := rootFs.NewObject(src)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return obj1.ModTime(), nil
 }
 
 func (r *run) updateData(t *testing.T, rootFs fs.Fs, src, data, append string) error {
@@ -1430,7 +1439,7 @@ func (r *run) updateData(t *testing.T, rootFs fs.Fs, src, data, append string) e
 		}
 		_, err = f.WriteString(data + append)
 		if err != nil {
-			f.Close()
+			_ = f.Close()
 			return err
 		}
 		err = f.Close()
@@ -1457,11 +1466,11 @@ func (r *run) updateData(t *testing.T, rootFs fs.Fs, src, data, append string) e
 
 func (r *run) cleanSize(t *testing.T, size int64) int64 {
 	if r.rootIsCrypt {
-		denominator := int64(65536+16)
+		denominator := int64(65536 + 16)
 		size = size - 32
 		quotient := size / denominator
 		remainder := size % denominator
-		return (quotient * 65536 + remainder-16)
+		return (quotient*65536 + remainder - 16)
 	}
 
 	return size
@@ -1518,7 +1527,7 @@ func (r *run) completeBackgroundUpload(t *testing.T, remote string, waitCh chan 
 	select {
 	case err = <-waitCh:
 		// continue
-	case <- time.After(maxDuration):
+	case <-time.After(maxDuration):
 		t.Fatalf("Timed out waiting to complete the background upload %v", remote)
 		return
 	}
@@ -1551,7 +1560,7 @@ func (r *run) completeAllBackgroundUploads(t *testing.T, f fs.Fs, lastRemote str
 				require.NoError(t, state.Error)
 				return
 			}
-		case <- time.After(maxDuration):
+		case <-time.After(maxDuration):
 			t.Fatalf("Timed out waiting to complete the background upload %v", lastRemote)
 			return
 		}
