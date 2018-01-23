@@ -1,4 +1,4 @@
-// +build windows
+// +build windows,go1.7
 
 package cache_test
 

@@ -1,4 +1,4 @@
-// +build !plan9,go1.7
+// +build !plan9,!windows,go1.7
 
 package cache_test
 
