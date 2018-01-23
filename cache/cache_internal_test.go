@@ -26,12 +26,8 @@ import (
 	"github.com/ncw/rclone/fstest"
 	"github.com/ncw/rclone/local"
 	"github.com/stretchr/testify/require"
-	"github.com/ncw/rclone/cmd/mountlib"
-	"github.com/ncw/rclone/cmd/mount"
 	"github.com/ncw/rclone/vfs"
 	"github.com/ncw/rclone/vfs/vfsflags"
-	"bazil.org/fuse"
-	fusefs "bazil.org/fuse/fs"
 	"github.com/ncw/rclone/crypt"
 	"runtime/debug"
 	"encoding/base64"
@@ -1089,68 +1085,6 @@ func (r *run) cleanupFs(t *testing.T, f fs.Fs, b *cache.Persistent) {
 	for k, v := range r.runDefaultFlagMap {
 		_ = flag.Set(k, v)
 	}
-}
-
-func (r *run) mountFs(t *testing.T, f fs.Fs) {
-	device := f.Name()+":"+f.Root()
-	var options = []fuse.MountOption{
-		fuse.MaxReadahead(uint32(mountlib.MaxReadAhead)),
-		fuse.Subtype("rclone"),
-		fuse.FSName(device), fuse.VolumeName(device),
-		fuse.NoAppleDouble(),
-		fuse.NoAppleXattr(),
-		fuse.AllowOther(),
-	}
-	err := os.MkdirAll(r.mntDir, os.ModePerm)
-	require.NoError(t, err)
-	c, err := fuse.Mount(r.mntDir, options...)
-	require.NoError(t, err)
-	filesys := mount.NewFS(f)
-	server := fusefs.New(c, nil)
-
-	// Serve the mount point in the background returning error to errChan
-	r.unmountRes = make(chan error, 1)
-	go func() {
-		err := server.Serve(filesys)
-		closeErr := c.Close()
-		if err == nil {
-			err = closeErr
-		}
-		r.unmountRes <- err
-	}()
-
-	// check if the mount process has an error to report
-	<-c.Ready
-	require.NoError(t, c.MountError)
-
-	r.unmountFn = func() error {
-		// Shutdown the VFS
-		filesys.VFS.Shutdown()
-		return fuse.Unmount(r.mntDir)
-	}
-
-	r.vfs = filesys.VFS
-	r.isMounted = true
-}
-
-func (r *run) unmountFs(t *testing.T, f fs.Fs) {
-	var err error
-
-	for i := 0; i < 4; i++ {
-		err = r.unmountFn()
-		if err != nil {
-			//log.Printf("signal to umount failed - retrying: %v", err)
-			time.Sleep(3 * time.Second)
-			continue
-		}
-		break
-	}
-	require.NoError(t, err)
-	err = <-r.unmountRes
-	require.NoError(t, err)
-	err = r.vfs.CleanUp()
-	require.NoError(t, err)
-	r.isMounted = false
 }
 
 func (r *run) randomBytes(t *testing.T, size int64) []byte {
