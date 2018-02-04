@@ -174,6 +174,7 @@ type Fs struct {
 	plexConnector    *plexConnector
 	backgroundRunner *backgroundWriter
 	cleanupChan      chan bool
+	parentsForgetFn	 []func(string)
 }
 
 // parseRootPath returns a cleaned root path and a nil error or "" and an error when the path is invalid
@@ -380,24 +381,16 @@ func NewFs(name, rootPath string) (fs.Fs, error) {
 		}
 	}()
 
-	// TODO: Explore something here but now it's not something we want
-	// when writing from cache, source FS will send a notification and clear it out immediately
-	//setup dir notification
-	//doDirChangeNotify := wrappedFs.Features().DirChangeNotify
-	//if doDirChangeNotify != nil {
-	//	doDirChangeNotify(func(dir string) {
-	//		d := NewAbsDirectory(f, dir)
-	//		d.Flush()
-	//		fs.Infof(dir, "updated from notification")
-	//	}, time.Second * 10)
-	//}
+	if doDirChangeNotify := wrappedFs.Features().DirChangeNotify; doDirChangeNotify != nil {
+		doDirChangeNotify(f.receiveDirChangeNotify, f.chunkCleanInterval)
+	}
 
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
 		DuplicateFiles:          false, // storage doesn't permit this
-		DirChangeNotify:         nil,
 	}).Fill(f).Mask(wrappedFs).WrapsFs(f, wrappedFs)
 	// override only those features that use a temp fs and it doesn't support them
+	f.features.DirChangeNotify = f.DirChangeNotify
 	if f.tempWritePath != "" {
 		if f.tempFs.Features().Copy == nil {
 			f.features.Copy = nil
@@ -419,6 +412,73 @@ func NewFs(name, rootPath string) (fs.Fs, error) {
 	f.features.DirCacheFlush = f.DirCacheFlush
 
 	return f, fsErr
+}
+
+func (f *Fs) receiveDirChangeNotify(forgetPath string) {
+	fs.Debugf(f, "notify: expiring cache for '%v'", forgetPath)
+	// notify upstreams too (vfs)
+	f.notifyDirChange(forgetPath)
+
+	var cd *Directory
+	co := NewObject(f, forgetPath)
+	err := f.cache.GetObject(co)
+	if err == nil {
+		cd = NewDirectory(f, cleanPath(path.Dir(co.Remote())))
+	} else {
+		cd = NewDirectory(f, forgetPath)
+	}
+
+	// we list all the cached objects and expire all of them
+	entries, err := f.cache.GetDirEntries(cd)
+	if err != nil {
+		fs.Debugf(forgetPath, "notify: ignoring notification on non cached dir")
+		return
+	}
+	for i := 0; i < len(entries); i++ {
+		if co, ok := entries[i].(*Object); ok {
+			co.CacheTs = time.Now().Add(f.fileAge * -1)
+			err = f.cache.AddObject(co)
+			if err != nil {
+				fs.Errorf(forgetPath, "notify: error expiring '%v': %v", co, err)
+			} else {
+				fs.Debugf(forgetPath, "notify: expired %v", co)
+			}
+		}
+	}
+	// finally, we expire the dir as well
+	err = f.cache.ExpireDir(cd)
+	if err != nil {
+		fs.Errorf(forgetPath, "notify: error expiring '%v': %v", cd, err)
+	} else {
+		fs.Debugf(forgetPath, "notify: expired '%v'", cd)
+	}
+}
+
+func (f *Fs) notifyDirChange(remote string) {
+	var cd *Directory
+	co := NewObject(f, remote)
+	err := f.cache.GetObject(co)
+	if err == nil {
+		pd := cleanPath(path.Dir(remote))
+		cd = NewDirectory(f, pd)
+	} else {
+		cd = NewDirectory(f, remote)
+	}
+
+	if len(f.parentsForgetFn) > 0 {
+		for _, fn := range f.parentsForgetFn {
+			fn(cd.Remote())
+		}
+	}
+}
+
+// DirChangeNotify can subsribe multiple callers
+// this is coupled with the wrapped fs DirChangeNotify (if it supports it)
+// and also notifies other caches (i.e VFS) to clear out whenever something changes
+func (f *Fs) DirChangeNotify(notifyFunc func(string), pollInterval time.Duration) chan bool {
+	fs.Debugf(f, "subscribing to DirChangeNotify")
+	f.parentsForgetFn = append(f.parentsForgetFn, notifyFunc)
+	return make(chan bool)
 }
 
 // Name of the remote (as passed into NewFs)
@@ -1332,4 +1392,5 @@ var (
 	_ fs.UnWrapper      = (*Fs)(nil)
 	_ fs.Wrapper        = (*Fs)(nil)
 	_ fs.ListRer        = (*Fs)(nil)
+	_ fs.DirChangeNotifier = (*Fs)(nil)
 )
