@@ -54,34 +54,35 @@ var (
 	runInstance                 *run
 	errNotSupported             = errors.New("not supported")
 	decryptedToEncryptedRemotes = map[string]string{
-		"one":               "lm4u7jjt3c85bf56vjqgeenuno",
-		"second":            "qvt1ochrkcfbptp5mu9ugb2l14",
-		"test":              "jn4tegjtpqro30t3o11thb4b5s",
-		"test2":             "qakvqnh8ttei89e0gc76crpql4",
-		"data.bin":          "0q2847tfko6mhj3dag3r809qbc",
-		"ticw/data.bin":     "5mv97b0ule6pht33srae5pice8/0q2847tfko6mhj3dag3r809qbc",
-		"tiuufo/test/one":   "vi6u1olqhirqv14cd8qlej1mgo/jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
-		"tiuufo/test/second":"vi6u1olqhirqv14cd8qlej1mgo/jn4tegjtpqro30t3o11thb4b5s/qvt1ochrkcfbptp5mu9ugb2l14",
-		"tiutfo/second/one": "legd371aa8ol36tjfklt347qnc/qvt1ochrkcfbptp5mu9ugb2l14/lm4u7jjt3c85bf56vjqgeenuno",
-		"second/one":        "qvt1ochrkcfbptp5mu9ugb2l14/lm4u7jjt3c85bf56vjqgeenuno",
-		"test/one":          "jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
-		"test/second":       "jn4tegjtpqro30t3o11thb4b5s/qvt1ochrkcfbptp5mu9ugb2l14",
-		"test/third":        "jn4tegjtpqro30t3o11thb4b5s/2nd7fjiop5h3ihfj1vl953aa5g",
-		"test/0.bin":        "jn4tegjtpqro30t3o11thb4b5s/e6frddt058b6kvbpmlstlndmtk",
-		"test/1.bin":        "jn4tegjtpqro30t3o11thb4b5s/kck472nt1k7qbmob0mt1p1crgc",
-		"test/2.bin":        "jn4tegjtpqro30t3o11thb4b5s/744oe9ven2rmak4u27if51qk24",
-		"test/3.bin":        "jn4tegjtpqro30t3o11thb4b5s/2bjd8kef0u5lmsu6qhqll34bcs",
-		"test/4.bin":        "jn4tegjtpqro30t3o11thb4b5s/cvjs73iv0a82v0c7r67avllh7s",
-		"test/5.bin":        "jn4tegjtpqro30t3o11thb4b5s/0plkdo790b6bnmt33qsdqmhv9c",
-		"test/6.bin":        "jn4tegjtpqro30t3o11thb4b5s/s5r633srnjtbh83893jovjt5d0",
-		"test/7.bin":        "jn4tegjtpqro30t3o11thb4b5s/6rq45tr9bjsammku622flmqsu4",
-		"test/8.bin":        "jn4tegjtpqro30t3o11thb4b5s/37bc6tcl3e31qb8cadvjb749vk",
-		"test/9.bin":        "jn4tegjtpqro30t3o11thb4b5s/t4pr35hnls32789o8fk0chk1ec",
+		"one":                "lm4u7jjt3c85bf56vjqgeenuno",
+		"second":             "qvt1ochrkcfbptp5mu9ugb2l14",
+		"test":               "jn4tegjtpqro30t3o11thb4b5s",
+		"test2":              "qakvqnh8ttei89e0gc76crpql4",
+		"data.bin":           "0q2847tfko6mhj3dag3r809qbc",
+		"ticw/data.bin":      "5mv97b0ule6pht33srae5pice8/0q2847tfko6mhj3dag3r809qbc",
+		"tiuufo/test/one":    "vi6u1olqhirqv14cd8qlej1mgo/jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
+		"tiuufo/test/second": "vi6u1olqhirqv14cd8qlej1mgo/jn4tegjtpqro30t3o11thb4b5s/qvt1ochrkcfbptp5mu9ugb2l14",
+		"tiutfo/test/one":    "legd371aa8ol36tjfklt347qnc/jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
+		"tiutfo/second/one":  "legd371aa8ol36tjfklt347qnc/qvt1ochrkcfbptp5mu9ugb2l14/lm4u7jjt3c85bf56vjqgeenuno",
+		"second/one":         "qvt1ochrkcfbptp5mu9ugb2l14/lm4u7jjt3c85bf56vjqgeenuno",
+		"test/one":           "jn4tegjtpqro30t3o11thb4b5s/lm4u7jjt3c85bf56vjqgeenuno",
+		"test/second":        "jn4tegjtpqro30t3o11thb4b5s/qvt1ochrkcfbptp5mu9ugb2l14",
+		"test/third":         "jn4tegjtpqro30t3o11thb4b5s/2nd7fjiop5h3ihfj1vl953aa5g",
+		"test/0.bin":         "jn4tegjtpqro30t3o11thb4b5s/e6frddt058b6kvbpmlstlndmtk",
+		"test/1.bin":         "jn4tegjtpqro30t3o11thb4b5s/kck472nt1k7qbmob0mt1p1crgc",
+		"test/2.bin":         "jn4tegjtpqro30t3o11thb4b5s/744oe9ven2rmak4u27if51qk24",
+		"test/3.bin":         "jn4tegjtpqro30t3o11thb4b5s/2bjd8kef0u5lmsu6qhqll34bcs",
+		"test/4.bin":         "jn4tegjtpqro30t3o11thb4b5s/cvjs73iv0a82v0c7r67avllh7s",
+		"test/5.bin":         "jn4tegjtpqro30t3o11thb4b5s/0plkdo790b6bnmt33qsdqmhv9c",
+		"test/6.bin":         "jn4tegjtpqro30t3o11thb4b5s/s5r633srnjtbh83893jovjt5d0",
+		"test/7.bin":         "jn4tegjtpqro30t3o11thb4b5s/6rq45tr9bjsammku622flmqsu4",
+		"test/8.bin":         "jn4tegjtpqro30t3o11thb4b5s/37bc6tcl3e31qb8cadvjb749vk",
+		"test/9.bin":         "jn4tegjtpqro30t3o11thb4b5s/t4pr35hnls32789o8fk0chk1ec",
 	}
 )
 
 func init() {
-	goflag.StringVar(&remoteName, "remote-internal", "TestCache", "Remote to test with, defaults to local filesystem")
+	goflag.StringVar(&remoteName, "remote-internal", "TestInternalCache", "Remote to test with, defaults to local filesystem")
 	goflag.StringVar(&mountDir, "mount-dir-internal", "", "")
 	goflag.StringVar(&uploadDir, "upload-dir-internal", "", "")
 	goflag.BoolVar(&useMount, "cache-use-mount", false, "Test only with mount")
@@ -126,14 +127,15 @@ func TestInternalVfsCache(t *testing.T) {
 	testSize := int64(524288000)
 
 	vfsflags.Opt.CacheMode = vfs.CacheModeWrites
-	//id := fmt.Sprintf("tivc%v", time.Now().Unix())
 	id := "tiuufo"
 	rootFs, boltDb := runInstance.newCacheFs(t, remoteName, id, true, true, nil, map[string]string{"cache-writes": "true", "cache-info-age": "1h"})
 	defer runInstance.cleanupFs(t, rootFs, boltDb)
 
-	rootFs.Mkdir("test")
+	err := rootFs.Mkdir("test")
+	require.NoError(t, err)
 	runInstance.writeObjectString(t, rootFs, "test/second", "content")
-	rootFs.List("test")
+	_, err = rootFs.List("test")
+	require.NoError(t, err)
 
 	testReader := runInstance.randomReader(t, testSize)
 	writeCh := make(chan interface{})
@@ -199,9 +201,9 @@ func TestInternalVfsCache(t *testing.T) {
 	}()
 
 	// wait for main file to be written
-	<- writeCh
+	<-writeCh
 	log.Printf("========== waiting for VFS to expire")
-	time.Sleep(time.Second*120)
+	time.Sleep(time.Second * 120)
 
 	// try a final read
 	li2 := [2]string{"test/one", "test/second"}
@@ -438,7 +440,7 @@ func TestInternalWrappedFsChangeNotSeen(t *testing.T) {
 				return errors.Errorf("%v <> %v", coModTime, o.ModTime())
 			}
 			return nil
-		}, 12, time.Second * 10)
+		}, 12, time.Second*10)
 		require.NoError(t, err)
 	} else {
 		coModTime, err := runInstance.modTime(t, rootFs, "data.bin")
@@ -1003,9 +1005,9 @@ type run struct {
 	unmountRes        chan error
 	vfs               *vfs.VFS
 	tempFiles         []*os.File
-	dbPath						string
-	chunkPath					string
-	vfsCachePath			string
+	dbPath            string
+	chunkPath         string
+	vfsCachePath      string
 }
 
 func newRun() *run {

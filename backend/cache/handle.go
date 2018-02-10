@@ -249,7 +249,7 @@ func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
 	if !found {
 		// we're gonna give the workers a chance to pickup the chunk
 		// and retry a couple of times
-		for i := 0; i < r.cacheFs().readRetries*2; i++ {
+		for i := 0; i < r.cacheFs().readRetries*8; i++ {
 			data, err = r.storage().GetChunk(r.cachedObject, chunkStart)
 			if err == nil {
 				found = true

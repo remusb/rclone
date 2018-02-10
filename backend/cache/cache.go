@@ -174,7 +174,7 @@ type Fs struct {
 	plexConnector    *plexConnector
 	backgroundRunner *backgroundWriter
 	cleanupChan      chan bool
-	parentsForgetFn	 []func(string)
+	parentsForgetFn  []func(string)
 }
 
 // parseRootPath returns a cleaned root path and a nil error or "" and an error when the path is invalid
@@ -454,6 +454,8 @@ func (f *Fs) receiveDirChangeNotify(forgetPath string) {
 	}
 }
 
+// notifyDirChange takes a remote (can be dir or entry) and
+// tries to determine which is it and notify upstreams of the dir change
 func (f *Fs) notifyDirChange(remote string) {
 	var cd *Directory
 	co := NewObject(f, remote)
@@ -465,9 +467,15 @@ func (f *Fs) notifyDirChange(remote string) {
 		cd = NewDirectory(f, remote)
 	}
 
+	f.notifyDirChangeUpstream(cd.Remote())
+}
+
+// notifyDirChangeUpstream will loop through all the upstreams and notify
+// of the provided remote (should be only a dir)
+func (f *Fs) notifyDirChangeUpstream(remote string) {
 	if len(f.parentsForgetFn) > 0 {
 		for _, fn := range f.parentsForgetFn {
-			fn(cd.Remote())
+			fn(remote)
 		}
 	}
 }
@@ -743,6 +751,10 @@ func (f *Fs) Mkdir(dir string) error {
 	} else {
 		fs.Infof(parentCd, "mkdir: cache expired")
 	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(parentCd.Remote())
+	}
 
 	return nil
 }
@@ -810,6 +822,10 @@ func (f *Fs) Rmdir(dir string) error {
 		fs.Errorf(dir, "rmdir: cache expire error: %v", err)
 	} else {
 		fs.Infof(parentCd, "rmdir: cache expired")
+	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(parentCd.Remote())
 	}
 
 	return nil
@@ -907,6 +923,10 @@ func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 	} else {
 		fs.Debugf(srcParent, "dirmove: cache expired")
 	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(srcParent.Remote())
+	}
 
 	// expire parent dir at the destination path
 	dstParent := NewDirectory(f, cleanPath(path.Dir(dstRemote)))
@@ -915,6 +935,10 @@ func (f *Fs) DirMove(src fs.Fs, srcRemote, dstRemote string) error {
 		fs.Errorf(dstParent, "dirmove: cache expire error: %v", err)
 	} else {
 		fs.Debugf(dstParent, "dirmove: cache expired")
+	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(dstParent.Remote())
 	}
 	// TODO: precache dst dir and save the chunks
 
@@ -1038,6 +1062,10 @@ func (f *Fs) put(in io.Reader, src fs.ObjectInfo, options []fs.OpenOption, put p
 	} else {
 		fs.Infof(parentCd, "put: cache expired")
 	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(parentCd.Remote())
+	}
 
 	return cachedObj, nil
 }
@@ -1126,6 +1154,10 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 	} else {
 		fs.Infof(parentCd, "copy: cache expired")
 	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(parentCd.Remote())
+	}
 	// expire src parent
 	srcParent := NewDirectory(f, cleanPath(path.Dir(src.Remote())))
 	err = f.cache.ExpireDir(srcParent)
@@ -1133,6 +1165,10 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 		fs.Errorf(srcParent, "copy: cache expire error: %v", err)
 	} else {
 		fs.Infof(srcParent, "copy: cache expired")
+	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(srcParent.Remote())
 	}
 
 	return co, nil
@@ -1218,6 +1254,10 @@ func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 	} else {
 		fs.Infof(parentCd, "move: cache expired")
 	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(parentCd.Remote())
+	}
 	// persist new
 	cachedObj := ObjectFromOriginal(f, obj).persist()
 	fs.Debugf(cachedObj, "move: added to cache")
@@ -1228,6 +1268,10 @@ func (f *Fs) Move(src fs.Object, remote string) (fs.Object, error) {
 		fs.Errorf(parentCd, "move: expire error: %v", err)
 	} else {
 		fs.Infof(parentCd, "move: cache expired")
+	}
+	// advertise to DirChangeNotify if wrapped doesn't do that
+	if f.Fs.Features().DirChangeNotify == nil {
+		f.notifyDirChangeUpstream(parentCd.Remote())
 	}
 
 	return cachedObj, nil
@@ -1381,16 +1425,16 @@ func cleanPath(p string) string {
 
 // Check the interfaces are satisfied
 var (
-	_ fs.Fs             = (*Fs)(nil)
-	_ fs.Purger         = (*Fs)(nil)
-	_ fs.Copier         = (*Fs)(nil)
-	_ fs.Mover          = (*Fs)(nil)
-	_ fs.DirMover       = (*Fs)(nil)
-	_ fs.PutUncheckeder = (*Fs)(nil)
-	_ fs.PutStreamer    = (*Fs)(nil)
-	_ fs.CleanUpper     = (*Fs)(nil)
-	_ fs.UnWrapper      = (*Fs)(nil)
-	_ fs.Wrapper        = (*Fs)(nil)
-	_ fs.ListRer        = (*Fs)(nil)
+	_ fs.Fs                = (*Fs)(nil)
+	_ fs.Purger            = (*Fs)(nil)
+	_ fs.Copier            = (*Fs)(nil)
+	_ fs.Mover             = (*Fs)(nil)
+	_ fs.DirMover          = (*Fs)(nil)
+	_ fs.PutUncheckeder    = (*Fs)(nil)
+	_ fs.PutStreamer       = (*Fs)(nil)
+	_ fs.CleanUpper        = (*Fs)(nil)
+	_ fs.UnWrapper         = (*Fs)(nil)
+	_ fs.Wrapper           = (*Fs)(nil)
+	_ fs.ListRer           = (*Fs)(nil)
 	_ fs.DirChangeNotifier = (*Fs)(nil)
 )
