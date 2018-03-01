@@ -175,6 +175,9 @@ type Fs struct {
 	backgroundRunner *backgroundWriter
 	cleanupChan      chan bool
 	parentsForgetFn  []func(string)
+	notifiedRemotes  map[string]bool
+	notifiedMu       sync.Mutex
+	parentsForgetMu  sync.Mutex
 }
 
 // parseRootPath returns a cleaned root path and a nil error or "" and an error when the path is invalid
@@ -263,6 +266,7 @@ func NewFs(name, rootPath string) (fs.Fs, error) {
 		tempWritePath:      *cacheTempWritePath,
 		tempWriteWait:      waitTime,
 		cleanupChan:        make(chan bool, 1),
+		notifiedRemotes:    make(map[string]bool),
 	}
 	if f.chunkTotalSize < (f.chunkSize * int64(f.totalWorkers)) {
 		return nil, errors.Errorf("don't set cache-total-chunk-size(%v) less than cache-chunk-size(%v) * cache-workers(%v)",
@@ -381,7 +385,14 @@ func NewFs(name, rootPath string) (fs.Fs, error) {
 		}
 	}()
 
-	if doDirChangeNotify := wrappedFs.Features().DirChangeNotify; doDirChangeNotify != nil {
+	supportsChangeNotify := false
+	// preferred way of change notification
+	if doChangeNotify := wrappedFs.Features().ChangeNotify; doChangeNotify != nil {
+		doChangeNotify(f.receiveDirChangeNotify, f.chunkCleanInterval)
+		supportsChangeNotify = true
+	}
+	// fallback in case change notify isn't supported. best than nothing
+	if doDirChangeNotify := wrappedFs.Features().DirChangeNotify; doDirChangeNotify != nil && !supportsChangeNotify {
 		doDirChangeNotify(f.receiveDirChangeNotify, f.chunkCleanInterval)
 	}
 
@@ -414,6 +425,7 @@ func NewFs(name, rootPath string) (fs.Fs, error) {
 	return f, fsErr
 }
 
+// receiveDirChangeNotify is a wrapper to notifications sent from the wrapped FS about changed files
 func (f *Fs) receiveDirChangeNotify(forgetPath string) {
 	fs.Debugf(f, "notify: expiring cache for '%v'", forgetPath)
 	// notify upstreams too (vfs)
@@ -423,27 +435,17 @@ func (f *Fs) receiveDirChangeNotify(forgetPath string) {
 	co := NewObject(f, forgetPath)
 	err := f.cache.GetObject(co)
 	if err == nil {
+		// expire the entry
+		co.CacheTs = time.Now().Add(f.fileAge * -1)
+		err = f.cache.AddObject(co)
+		if err != nil {
+			fs.Errorf(forgetPath, "notify: error expiring '%v': %v", co, err)
+		} else {
+			fs.Debugf(forgetPath, "notify: expired %v", co)
+		}
 		cd = NewDirectory(f, cleanPath(path.Dir(co.Remote())))
 	} else {
 		cd = NewDirectory(f, forgetPath)
-	}
-
-	// we list all the cached objects and expire all of them
-	entries, err := f.cache.GetDirEntries(cd)
-	if err != nil {
-		fs.Debugf(forgetPath, "notify: ignoring notification on non cached dir")
-		return
-	}
-	for i := 0; i < len(entries); i++ {
-		if co, ok := entries[i].(*Object); ok {
-			co.CacheTs = time.Now().Add(f.fileAge * -1)
-			err = f.cache.AddObject(co)
-			if err != nil {
-				fs.Errorf(forgetPath, "notify: error expiring '%v': %v", co, err)
-			} else {
-				fs.Debugf(forgetPath, "notify: expired %v", co)
-			}
-		}
 	}
 	// finally, we expire the dir as well
 	err = f.cache.ExpireDir(cd)
@@ -452,6 +454,11 @@ func (f *Fs) receiveDirChangeNotify(forgetPath string) {
 	} else {
 		fs.Debugf(forgetPath, "notify: expired '%v'", cd)
 	}
+
+	f.notifiedMu.Lock()
+	defer f.notifiedMu.Unlock()
+	f.notifiedRemotes[forgetPath] = true
+	f.notifiedRemotes[cd.Remote()] = true
 }
 
 // notifyDirChange takes a remote (can be dir or entry) and
@@ -463,10 +470,11 @@ func (f *Fs) notifyDirChange(remote string) {
 	if err == nil {
 		pd := cleanPath(path.Dir(remote))
 		cd = NewDirectory(f, pd)
+		// TODO is this worth it?
+		f.notifyDirChangeUpstream(co.Remote())
 	} else {
 		cd = NewDirectory(f, remote)
 	}
-
 	f.notifyDirChangeUpstream(cd.Remote())
 }
 
@@ -481,6 +489,8 @@ func (f *Fs) notifyDirChangeUpstreamIfNeeded(remote string) {
 // notifyDirChangeUpstream will loop through all the upstreams and notify
 // of the provided remote (should be only a dir)
 func (f *Fs) notifyDirChangeUpstream(remote string) {
+	f.parentsForgetMu.Lock()
+	defer f.parentsForgetMu.Unlock()
 	if len(f.parentsForgetFn) > 0 {
 		for _, fn := range f.parentsForgetFn {
 			fn(remote)
@@ -488,10 +498,12 @@ func (f *Fs) notifyDirChangeUpstream(remote string) {
 	}
 }
 
-// DirChangeNotify can subsribe multiple callers
+// DirChangeNotify can subscribe multiple callers
 // this is coupled with the wrapped fs DirChangeNotify (if it supports it)
 // and also notifies other caches (i.e VFS) to clear out whenever something changes
 func (f *Fs) DirChangeNotify(notifyFunc func(string), pollInterval time.Duration) chan bool {
+	f.parentsForgetMu.Lock()
+	defer f.parentsForgetMu.Unlock()
 	fs.Debugf(f, "subscribing to DirChangeNotify")
 	f.parentsForgetFn = append(f.parentsForgetFn, notifyFunc)
 	return make(chan bool)
@@ -649,12 +661,13 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 			fs.Debugf(dir, "list: cached object: %v", co)
 		case fs.Directory:
 			cdd := DirectoryFromOriginal(f, o)
-			err := f.cache.AddDir(cdd)
-			if err != nil {
-				fs.Errorf(dir, "list: error caching dir from listing %v", o)
-			} else {
-				fs.Debugf(dir, "list: cached dir: %v", cdd)
-			}
+			// FIXME this overrides a possible expired dir
+			//err := f.cache.AddDir(cdd)
+			//if err != nil {
+			//	fs.Errorf(dir, "list: error caching dir from listing %v", o)
+			//} else {
+			//	fs.Debugf(dir, "list: cached dir: %v", cdd)
+			//}
 			cachedEntries = append(cachedEntries, cdd)
 		default:
 			fs.Debugf(entry, "list: Unknown object type %T", entry)
@@ -801,7 +814,7 @@ func (f *Fs) Rmdir(dir string) error {
 			fs.Debugf(dir, "rmdir: read %v from temp fs", len(queuedEntries))
 			fs.Debugf(dir, "rmdir: temp fs entries: %v", queuedEntries)
 			if len(queuedEntries) > 0 {
-				fs.Errorf(dir, "rmdir: temporary dir not empty")
+				fs.Errorf(dir, "rmdir: temporary dir not empty: %v", queuedEntries)
 				return fs.ErrorDirectoryNotEmpty
 			}
 		}
@@ -1030,6 +1043,11 @@ func (f *Fs) put(in io.Reader, src fs.ObjectInfo, options []fs.OpenOption, put p
 
 	// queue for upload and store in temp fs if configured
 	if f.tempWritePath != "" {
+		// we need to clear the caches before a put through temp fs
+		parentCd := NewDirectory(f, cleanPath(path.Dir(src.Remote())))
+		_ = f.cache.ExpireDir(parentCd)
+		f.notifyDirChangeUpstreamIfNeeded(parentCd.Remote())
+
 		obj, err = f.tempFs.Put(in, src, options...)
 		if err != nil {
 			fs.Errorf(obj, "put: failed to upload in temp fs: %v", err)
@@ -1414,6 +1432,19 @@ func (f *Fs) GetBackgroundUploadChannel() chan BackgroundUploadState {
 		return f.backgroundRunner.notifyCh
 	}
 	return nil
+}
+
+func (f *Fs) isNotifiedRemote(remote string) bool {
+	f.notifiedMu.Lock()
+	defer f.notifiedMu.Unlock()
+
+	n, ok := f.notifiedRemotes[remote]
+	if !ok || !n {
+		return false
+	}
+
+	delete(f.notifiedRemotes, remote)
+	return n
 }
 
 func cleanPath(p string) string {
