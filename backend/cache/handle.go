@@ -91,7 +91,13 @@ func (r *Handle) storage() *Persistent {
 
 // String representation of this reader
 func (r *Handle) String() string {
-	return r.cachedObject.abs()
+	if cr, yes := r.cacheFs().isWrappedByCrypt(); yes {
+		dec, err := cr.DecryptFileName(r.cachedObject.Remote())
+		if err == nil {
+			return dec
+		}
+	}
+	return r.cachedObject.Remote()
 }
 
 // startReadWorkers will start the worker pool

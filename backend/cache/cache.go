@@ -443,7 +443,24 @@ Show statistics for the cache remote.
 `,
 	})
 
+	rc.Add(rc.Call{
+		Path:  "cache/data",
+		Fn:    f.httpData,
+		Title: "Print cached info",
+		Help: `
+Show statistics for the cache remote.
+`,
+	})
+
 	return f, fsErr
+}
+
+func (f *Fs) httpData(in rc.Params) (out rc.Params, err error) {
+	out = make(rc.Params)
+	m := f.cache.printData(f)
+	out["status"] = "ok"
+	out["data"] = m
+	return out, nil
 }
 
 func (f *Fs) httpStats(in rc.Params) (out rc.Params, err error) {

@@ -116,6 +116,12 @@ func (o *Object) String() string {
 	if o == nil {
 		return "<nil>"
 	}
+	//if cr, yes := o.CacheFs.isWrappedByCrypt(); yes {
+	//	dec, err := cr.DecryptFileName(o.Remote())
+	//	if err == nil {
+	//		return dec
+	//	}
+	//}
 	return o.Remote()
 }
 

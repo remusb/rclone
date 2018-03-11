@@ -716,6 +716,34 @@ func TestInternalMaxChunkSizeRespected(t *testing.T) {
 	require.True(t, boltDb.HasChunk(co, chunkSize*5))
 }
 
+func TestInternalChunkOrderRespected(t *testing.T) {
+	id := fmt.Sprintf("ticor%v", time.Now().Unix())
+	rootFs, boltDb := runInstance.newCacheFs(t, remoteName, id, false, true, map[string]string{"chunk_total_size": "10M"}, map[string]string{"cache-workers": "1"})
+	defer runInstance.cleanupFs(t, rootFs, boltDb)
+
+	cfs, err := runInstance.getCacheFs(rootFs)
+	require.NoError(t, err)
+	chunkSize := cfs.ChunkSize()
+	totalChunks := 20
+
+	// create some rand test data
+	testData := runInstance.randomBytes(t, (int64(totalChunks-1)*chunkSize + chunkSize/2))
+	runInstance.writeRemoteBytes(t, rootFs, "data.bin", testData)
+	o, err := cfs.NewObject(runInstance.encryptRemoteIfNeeded(t, "data.bin"))
+	require.NoError(t, err)
+	co, ok := o.(*cache.Object)
+	require.True(t, ok)
+
+	for i := 0; i < 4; i++ { // read first 4
+		_ = runInstance.readDataFromObj(t, co, chunkSize*int64(i), chunkSize*int64(i+1), false)
+	}
+
+	_ = runInstance.readDataFromObj(t, co, int64(0), chunkSize-1, false)
+	// the first chunk must be in cache
+	cfs.CleanUpCache(true)
+	require.True(t, boltDb.HasChunk(co, int64(0)))
+}
+
 func TestInternalExpiredEntriesRemoved(t *testing.T) {
 	id := fmt.Sprintf("tieer%v", time.Now().Unix())
 	vfsflags.Opt.DirCacheTime = time.Second * 4 // needs to be lower than the defined
@@ -1196,6 +1224,41 @@ func TestInternalUploadUploadingFileOperations(t *testing.T) {
 	//require.Equal(t, secondModTime, firstModTime)
 	//require.NotEqual(t, time.Time{}, firstModTime)
 	//require.NotEqual(t, time.Time{}, secondModTime)
+}
+
+func TestInternalMountCacheTempOverwrite(t *testing.T) {
+	id := fmt.Sprintf("timcto%v", time.Now().Unix())
+	rootFs, boltDb := runInstance.newCacheFs(t, remoteName, id, true, true,
+		nil,
+		map[string]string{"cache-tmp-upload-path": path.Join(runInstance.tmpUploadDir, id), "cache-tmp-wait-time": "1s"})
+	defer runInstance.cleanupFs(t, rootFs, boltDb)
+	if !runInstance.useMount {
+		t.Skipf("")
+	}
+
+	boltDb.PurgeTempUploads()
+
+	// create some rand test data
+	runInstance.mkdir(t, rootFs, "test")
+	runInstance.writeRemoteString(t, rootFs, "test/one", "one content updated")
+
+	runInstance.completeAllBackgroundUploads(t, rootFs, "test/one")
+	time.Sleep(time.Second * 61)
+
+	// check if it can be read
+	data1, err := runInstance.readDataFromRemote(t, rootFs, "test/one", 0, int64(len([]byte("one content updated"))), false)
+	require.NoError(t, err)
+	require.Equal(t, []byte("one content updated"), data1)
+
+	runInstance.writeRemoteString(t, rootFs, "test/one", "one content")
+
+	runInstance.completeAllBackgroundUploads(t, rootFs, "test/one")
+	time.Sleep(time.Second * 61)
+
+	// check if it can be read
+	data1, err = runInstance.readDataFromRemote(t, rootFs, "test/one", 0, int64(len([]byte("one content"))), false)
+	require.NoError(t, err)
+	require.Equal(t, []byte("one content"), data1)
 }
 
 // FIXME, enable this when mount is sorted out

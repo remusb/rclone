@@ -22,6 +22,7 @@ import (
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/walk"
 	"github.com/pkg/errors"
+	"sort"
 )
 
 // Constants
@@ -29,6 +30,7 @@ const (
 	RootBucket   = "root"
 	RootTsBucket = "rootTs"
 	DataTsBucket = "dataTs"
+	dataCountBucket = "dataCount"
 	tempBucket   = "pending"
 )
 
@@ -133,6 +135,7 @@ func (b *Persistent) connect() error {
 		_, _ = tx.CreateBucketIfNotExists([]byte(RootBucket))
 		_, _ = tx.CreateBucketIfNotExists([]byte(RootTsBucket))
 		_, _ = tx.CreateBucketIfNotExists([]byte(DataTsBucket))
+		_, _ = tx.CreateBucketIfNotExists([]byte(dataCountBucket))
 		_, _ = tx.CreateBucketIfNotExists([]byte(tempBucket))
 
 		return nil
@@ -150,7 +153,7 @@ func (b *Persistent) getBucket(dir string, createIfMissing bool, tx *bolt.Tx) *b
 	entries := strings.FieldsFunc(dir, func(c rune) bool {
 		// cover Windows where rclone still uses '/' as path separator
 		// this should be safe as '/' is not a valid Windows character
-		return (os.PathSeparator == c || c == rune('/'))
+		return os.PathSeparator == c || c == rune('/')
 	})
 	bucket := tx.Bucket([]byte(RootBucket))
 
@@ -385,6 +388,7 @@ func (b *Persistent) AddObject(cachedObject *Object) error {
 func (b *Persistent) RemoveObject(fp string) error {
 	parentDir, objName := path.Split(fp)
 	return b.db.Update(func(tx *bolt.Tx) error {
+		dataCntBucket := tx.Bucket([]byte(dataCountBucket))
 		bucket := b.getBucket(cleanPath(parentDir), false, tx)
 		if bucket == nil {
 			return errors.Errorf("couldn't open parent bucket for %v", cleanPath(parentDir))
@@ -392,6 +396,9 @@ func (b *Persistent) RemoveObject(fp string) error {
 		err := bucket.Delete([]byte(cleanPath(objName)))
 		if err != nil {
 			fs.Debugf(fp, "couldn't delete obj from storage: %v", err)
+		}
+		if b := dataCntBucket.Bucket([]byte(fp)); b != nil {
+			dataCntBucket.DeleteBucket([]byte(fp))
 		}
 		// delete chunks on disk
 		// safe to ignore as the file might not have been open
@@ -455,6 +462,20 @@ func (b *Persistent) GetChunk(cachedObject *Object, offset int64) ([]byte, error
 		return nil, err
 	}
 
+	_ = b.db.Batch(func(tx *bolt.Tx) error {
+		cntBucket := tx.Bucket([]byte(dataCountBucket))
+		readCnt := 0
+		objCntBucket, err := cntBucket.CreateBucketIfNotExists([]byte(cachedObject.abs()))
+		if err != nil {
+			return err
+		}
+		if v := objCntBucket.Get(i64tob(offset)); v != nil {
+			readCnt = btoi(v)
+		}
+		_ = objCntBucket.Put(i64tob(offset), itob(readCnt+1))
+		return nil
+	})
+
 	return data, err
 }
 
@@ -470,8 +491,32 @@ func (b *Persistent) AddChunk(fp string, data []byte, offset int64) error {
 
 	return b.db.Update(func(tx *bolt.Tx) error {
 		tsBucket := tx.Bucket([]byte(DataTsBucket))
+		cntBucket := tx.Bucket([]byte(dataCountBucket))
 		ts := time.Now()
 		found := false
+
+		// increment read count
+		readCnt := 0
+		objCntBucket, err := cntBucket.CreateBucketIfNotExists([]byte(fp))
+		if err != nil {
+			return err
+		}
+		if v := objCntBucket.Get(i64tob(offset)); v != nil {
+			readCnt = btoi(v)
+		}
+		_ = objCntBucket.Put(i64tob(offset), itob(readCnt+1))
+
+		// add obj in db
+		addObj := func(k int64, v chunkInfo) {
+			enc, err := json.Marshal(v)
+			if err != nil {
+				fs.Debugf(fp, "failed to timestamp chunk: %v", err)
+			}
+			err = tsBucket.Put(i64tob(k), enc)
+			if err != nil {
+				fs.Debugf(fp, "failed to timestamp chunk: %v", err)
+			}
+		}
 
 		// delete (older) timestamps for the same object
 		c := tsBucket.Cursor()
@@ -482,8 +527,9 @@ func (b *Persistent) AddChunk(fp string, data []byte, offset int64) error {
 				continue
 			}
 			if ci.Path == fp && ci.Offset == offset {
-				if tsInCache := time.Unix(0, btoi(k)); tsInCache.After(ts) && !found {
+				if tsInCache := time.Unix(0, btoi64(k)); tsInCache.After(ts) && !found {
 					found = true
+					addObj(btoi64(k), ci)
 					continue
 				}
 				err := c.Delete()
@@ -496,14 +542,7 @@ func (b *Persistent) AddChunk(fp string, data []byte, offset int64) error {
 		if found {
 			return nil
 		}
-		enc, err := json.Marshal(chunkInfo{Path: fp, Offset: offset, Size: int64(len(data))})
-		if err != nil {
-			fs.Debugf(fp, "failed to timestamp chunk: %v", err)
-		}
-		err = tsBucket.Put(itob(ts.UnixNano()), enc)
-		if err != nil {
-			fs.Debugf(fp, "failed to timestamp chunk: %v", err)
-		}
+		addObj(ts.UnixNano(), chunkInfo{Path: fp, Offset: offset, Size: int64(len(data))})
 		return nil
 	})
 }
@@ -515,62 +554,89 @@ func (b *Persistent) CleanChunksByAge(chunkAge time.Duration) {
 
 // CleanChunksByNeed is a noop for this implementation
 func (b *Persistent) CleanChunksByNeed(offset int64) {
-	// noop: we want to clean a Bolt DB by time only
+	// noop: we want to clean a Bolt DB by size only
 }
 
 // CleanChunksBySize will cleanup chunks after the total size passes a certain point
 func (b *Persistent) CleanChunksBySize(maxSize int64) {
 	b.cleanupMux.Lock()
 	defer b.cleanupMux.Unlock()
-	var cntChunks int
+	//var cntChunks int
 	var roughlyCleaned fs.SizeSuffix
+	cntChunks := make(map[int]int)
 
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		dataTsBucket := tx.Bucket([]byte(DataTsBucket))
 		if dataTsBucket == nil {
 			return errors.Errorf("Couldn't open (%v) bucket", DataTsBucket)
 		}
+		dataCntBucket, err := tx.CreateBucketIfNotExists([]byte(dataCountBucket))
+		if err != nil {
+			return err
+		}
 		// iterate through ts
 		c := dataTsBucket.Cursor()
 		totalSize := int64(0)
+		tsByReads := make(map[int][]int64)
+		var readKeys []int
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var ci chunkInfo
 			err := json.Unmarshal(v, &ci)
 			if err != nil {
 				continue
 			}
-
+			readCnt := 0
+			if b, err := dataCntBucket.CreateBucketIfNotExists([]byte(ci.Path)); err == nil {
+				if v2 := b.Get(i64tob(ci.Offset)); v2 != nil {
+					readCnt = btoi(v2)
+				}
+			}
+			tsByReads[readCnt] = append(tsByReads[readCnt], btoi64(k))
 			totalSize += ci.Size
 		}
+		for k := range tsByReads {
+			readKeys = append(readKeys, k)
+		}
+		sort.Ints(readKeys)
 
 		if totalSize > maxSize {
 			needToClean := totalSize - maxSize
 			roughlyCleaned = fs.SizeSuffix(needToClean)
-			for k, v := c.First(); k != nil; k, v = c.Next() {
-				var ci chunkInfo
-				err := json.Unmarshal(v, &ci)
-				if err != nil {
-					continue
-				}
-				// delete this ts entry
-				err = c.Delete()
-				if err != nil {
-					fs.Errorf(ci.Path, "failed deleting chunk ts during cleanup (%v): %v", ci.Offset, err)
-					continue
-				}
-				err = os.Remove(path.Join(b.dataPath, ci.Path, strconv.FormatInt(ci.Offset, 10)))
-				if err == nil {
-					cntChunks++
-					needToClean -= ci.Size
-					if needToClean <= 0 {
-						break
+
+			out:
+			for _, readCntKey := range readKeys {
+				for _, idxKey := range tsByReads[readCntKey] {
+					k := i64tob(idxKey)
+					v := dataTsBucket.Get(k)
+					var ci chunkInfo
+					err := json.Unmarshal(v, &ci)
+					if err != nil {
+						continue
+					}
+					// delete this ts entry
+					err = dataTsBucket.Delete(k)
+					if err != nil {
+						fs.Errorf(ci.Path, "failed deleting chunk ts during cleanup (%v): %v", ci.Offset, err)
+						continue
+					}
+					err = os.Remove(path.Join(b.dataPath, ci.Path, strconv.FormatInt(ci.Offset, 10)))
+					if err == nil {
+						if _, ok := cntChunks[readCntKey]; ok {
+							cntChunks[readCntKey]++
+						} else {
+							cntChunks[readCntKey] = 1
+						}
+
+						needToClean -= ci.Size
+						if needToClean <= 0 {
+							break out
+						}
 					}
 				}
 			}
 		}
-		if cntChunks > 0 {
-			fs.Infof("cache-cleanup", "chunks %v, est. size: %v", cntChunks, roughlyCleaned.String())
-
+		if len(cntChunks) > 0 {
+			fs.Infof("cache-cleanup", "chunks by read count: %v, est. size: %v", cntChunks, roughlyCleaned.String())
 		}
 		return nil
 	})
@@ -634,24 +700,24 @@ func (b *Persistent) Stats() (map[string]map[string]interface{}, error) {
 		if k, v := c.First(); k != nil {
 			var ci chunkInfo
 			_ = json.Unmarshal(v, &ci)
-			r["data"]["oldest-ts"] = time.Unix(0, btoi(k))
+			r["data"]["oldest-ts"] = time.Unix(0, btoi64(k))
 			r["data"]["oldest-file"] = ci.Path
 		}
 		if k, v := c.Last(); k != nil {
 			var ci chunkInfo
 			_ = json.Unmarshal(v, &ci)
-			r["data"]["newest-ts"] = time.Unix(0, btoi(k))
+			r["data"]["newest-ts"] = time.Unix(0, btoi64(k))
 			r["data"]["newest-file"] = ci.Path
 		}
 
 		c = rootTsBucket.Cursor()
 		if k, v := c.First(); k != nil {
 			// split to get (abs path - offset)
-			r["files"]["oldest-ts"] = time.Unix(0, btoi(k))
+			r["files"]["oldest-ts"] = time.Unix(0, btoi64(k))
 			r["files"]["oldest-name"] = string(v)
 		}
 		if k, v := c.Last(); k != nil {
-			r["files"]["newest-ts"] = time.Unix(0, btoi(k))
+			r["files"]["newest-ts"] = time.Unix(0, btoi64(k))
 			r["files"]["newest-name"] = string(v)
 		}
 
@@ -659,6 +725,47 @@ func (b *Persistent) Stats() (map[string]map[string]interface{}, error) {
 	})
 
 	return r, nil
+}
+
+// Stats returns a go map with the stats key values
+func (b *Persistent) printData(f *Fs) (map[string]map[int64]int) {
+	ret := make(map[string]map[int64]int)
+	_ = b.db.View(func(tx *bolt.Tx) error {
+		dataTsBucket := tx.Bucket([]byte(DataTsBucket))
+		if dataTsBucket == nil {
+			return errors.Errorf("Couldn't open (%v) bucket", DataTsBucket)
+		}
+		dataCntBucket := tx.Bucket([]byte(dataCountBucket))
+		if dataCntBucket == nil {
+			return errors.Errorf("Couldn't open (%v) bucket", dataCountBucket)
+		}
+		// iterate through ts
+		c := dataTsBucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var ci chunkInfo
+			err := json.Unmarshal(v, &ci)
+			if err != nil {
+				continue
+			}
+			pp := f.cleanRootFromPath(ci.Path)
+			if cr, y := f.isWrappedByCrypt(); y {
+				pp, _ = cr.DecryptFileName(pp)
+			}
+			if _, ok := ret[pp]; !ok {
+				ret[pp] = make(map[int64]int)
+			}
+
+			readCnt := 1
+			if b := dataCntBucket.Bucket([]byte(ci.Path)); b != nil {
+				if v2 := b.Get(i64tob(ci.Offset)); v2 != nil {
+					readCnt = btoi(v2)
+				}
+			}
+			ret[pp][ci.Offset] = readCnt
+		}
+		return nil
+	})
+	return ret
 }
 
 // Purge will flush the entire cache
@@ -670,10 +777,12 @@ func (b *Persistent) Purge() {
 		_ = tx.DeleteBucket([]byte(RootBucket))
 		_ = tx.DeleteBucket([]byte(RootTsBucket))
 		_ = tx.DeleteBucket([]byte(DataTsBucket))
+		_ = tx.DeleteBucket([]byte(dataCountBucket))
 
 		_, _ = tx.CreateBucketIfNotExists([]byte(RootBucket))
 		_, _ = tx.CreateBucketIfNotExists([]byte(RootTsBucket))
 		_, _ = tx.CreateBucketIfNotExists([]byte(DataTsBucket))
+		_, _ = tx.CreateBucketIfNotExists([]byte(dataCountBucket))
 
 		return nil
 	})
@@ -702,7 +811,7 @@ func (b *Persistent) GetChunkTs(path string, offset int64) (time.Time, error) {
 				continue
 			}
 			if ci.Path == path && ci.Offset == offset {
-				t = time.Unix(0, btoi(k))
+				t = time.Unix(0, btoi64(k))
 				return nil
 			}
 		}
@@ -1060,15 +1169,25 @@ func (b *Persistent) Close() {
 	b.open = false
 }
 
-// itob returns an 8-byte big endian representation of v.
-func itob(v int64) []byte {
+// i64tob returns an 8-byte big endian representation of v.
+func i64tob(v int64) []byte {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, uint64(v))
 	return b
 }
 
-func btoi(d []byte) int64 {
+func btoi64(d []byte) int64 {
 	return int64(binary.BigEndian.Uint64(d))
+}
+
+func itob(v int) []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, uint32(v))
+	return b
+}
+
+func btoi(d []byte) int {
+	return int(binary.BigEndian.Uint32(d))
 }
 
 // cloneBytes returns a copy of a given slice.
