@@ -22,6 +22,7 @@ import (
 	"github.com/ncw/rclone/fs"
 	"github.com/ncw/rclone/fs/walk"
 	"github.com/pkg/errors"
+	"sort"
 )
 
 // Constants
@@ -67,6 +68,7 @@ type chunkInfo struct {
 	Path   string
 	Offset int64
 	Size   int64
+	ReadCnt int
 }
 
 type tempUploadInfo struct {
@@ -424,6 +426,27 @@ func (b *Persistent) GetChunk(cachedObject *Object, offset int64) ([]byte, error
 		return nil, err
 	}
 
+	_ = b.db.Batch(func(tx *bolt.Tx) error {
+		tsBucket := tx.Bucket([]byte(DataTsBucket))
+		c := tsBucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var ci chunkInfo
+			err = json.Unmarshal(v, &ci)
+			if err != nil {
+				continue
+			}
+			if ci.Path == cachedObject.abs() && ci.Offset == offset {
+				ci.ReadCnt++
+				enc, err := json.Marshal(ci)
+				if err != nil {
+					continue
+				}
+				_ = tsBucket.Put(k, enc)
+			}
+		}
+		return nil
+	})
+
 	return data, err
 }
 
@@ -441,6 +464,18 @@ func (b *Persistent) AddChunk(fp string, data []byte, offset int64) error {
 		tsBucket := tx.Bucket([]byte(DataTsBucket))
 		ts := time.Now()
 		found := false
+		maxCnt := 1
+
+		addObj := func(k int64, v chunkInfo) {
+			enc, err := json.Marshal(v)
+			if err != nil {
+				fs.Debugf(fp, "failed to timestamp chunk: %v", err)
+			}
+			err = tsBucket.Put(itob(k), enc)
+			if err != nil {
+				fs.Debugf(fp, "failed to timestamp chunk: %v", err)
+			}
+		}
 
 		// delete (older) timestamps for the same object
 		c := tsBucket.Cursor()
@@ -451,8 +486,13 @@ func (b *Persistent) AddChunk(fp string, data []byte, offset int64) error {
 				continue
 			}
 			if ci.Path == fp && ci.Offset == offset {
+				if maxCnt < ci.ReadCnt {
+					maxCnt = ci.ReadCnt+1
+				}
 				if tsInCache := time.Unix(0, btoi(k)); tsInCache.After(ts) && !found {
 					found = true
+					ci.ReadCnt++
+					addObj(btoi(k), ci)
 					continue
 				}
 				err := c.Delete()
@@ -465,14 +505,7 @@ func (b *Persistent) AddChunk(fp string, data []byte, offset int64) error {
 		if found {
 			return nil
 		}
-		enc, err := json.Marshal(chunkInfo{Path: fp, Offset: offset, Size: int64(len(data))})
-		if err != nil {
-			fs.Debugf(fp, "failed to timestamp chunk: %v", err)
-		}
-		err = tsBucket.Put(itob(ts.UnixNano()), enc)
-		if err != nil {
-			fs.Debugf(fp, "failed to timestamp chunk: %v", err)
-		}
+		addObj(ts.UnixNano(), chunkInfo{Path: fp, Offset: offset, Size: int64(len(data)), ReadCnt: maxCnt})
 		return nil
 	})
 }
@@ -502,44 +535,57 @@ func (b *Persistent) CleanChunksBySize(maxSize int64) {
 		// iterate through ts
 		c := dataTsBucket.Cursor()
 		totalSize := int64(0)
+		tsByReads := make(map[int][]int64)
+		var readKeys []int
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var ci chunkInfo
 			err := json.Unmarshal(v, &ci)
 			if err != nil {
 				continue
 			}
-
+			tsByReads[ci.ReadCnt] = append(tsByReads[ci.ReadCnt], btoi(k))
 			totalSize += ci.Size
 		}
+		for k := range tsByReads {
+			readKeys = append(readKeys, k)
+		}
+		sort.Ints(readKeys)
+		fs.Debugf("bolt", "clean map: %v", tsByReads)
 
 		if totalSize > maxSize {
 			needToClean := totalSize - maxSize
 			roughlyCleaned = fs.SizeSuffix(needToClean)
-			for k, v := c.First(); k != nil; k, v = c.Next() {
-				var ci chunkInfo
-				err := json.Unmarshal(v, &ci)
-				if err != nil {
-					continue
-				}
-				// delete this ts entry
-				err = c.Delete()
-				if err != nil {
-					fs.Errorf(ci.Path, "failed deleting chunk ts during cleanup (%v): %v", ci.Offset, err)
-					continue
-				}
-				err = os.Remove(path.Join(b.dataPath, ci.Path, strconv.FormatInt(ci.Offset, 10)))
-				if err == nil {
-					cntChunks++
-					needToClean -= ci.Size
-					if needToClean <= 0 {
-						break
+
+			out:
+			for _, readCntKey := range readKeys {
+				for _, idxKey := range tsByReads[readCntKey] {
+					k := itob(idxKey)
+					v := dataTsBucket.Get(k)
+					var ci chunkInfo
+					err := json.Unmarshal(v, &ci)
+					if err != nil {
+						continue
+					}
+					// delete this ts entry
+					err = dataTsBucket.Delete(k)
+					fs.Debugf("bolt", "deleting: %v", ci)
+					if err != nil {
+						fs.Errorf(ci.Path, "failed deleting chunk ts during cleanup (%v): %v", ci.Offset, err)
+						continue
+					}
+					err = os.Remove(path.Join(b.dataPath, ci.Path, strconv.FormatInt(ci.Offset, 10)))
+					if err == nil {
+						cntChunks++
+						needToClean -= ci.Size
+						if needToClean <= 0 {
+							break out
+						}
 					}
 				}
 			}
 		}
 		if cntChunks > 0 {
 			fs.Infof("cache-cleanup", "chunks %v, est. size: %v", cntChunks, roughlyCleaned.String())
-
 		}
 		return nil
 	})

@@ -660,6 +660,33 @@ func TestInternalMaxChunkSizeRespected(t *testing.T) {
 	require.True(t, boltDb.HasChunk(co, chunkSize*5))
 }
 
+func TestInternalChunkOrderRespected(t *testing.T) {
+	id := fmt.Sprintf("ticor%v", time.Now().Unix())
+	rootFs, boltDb := runInstance.newCacheFs(t, remoteName, id, false, true, map[string]string{"chunk_total_size": "10M"}, map[string]string{"cache-workers": "1"})
+	defer runInstance.cleanupFs(t, rootFs, boltDb)
+
+	cfs, err := runInstance.getCacheFs(rootFs)
+	require.NoError(t, err)
+	chunkSize := cfs.ChunkSize()
+	totalChunks := 20
+
+	// create some rand test data
+	testData := runInstance.randomBytes(t, (int64(totalChunks-1)*chunkSize + chunkSize/2))
+	runInstance.writeRemoteBytes(t, rootFs, "data.bin", testData)
+	o, err := cfs.NewObject(runInstance.encryptRemoteIfNeeded(t, "data.bin"))
+	require.NoError(t, err)
+	co, ok := o.(*cache.Object)
+	require.True(t, ok)
+
+	for i := 0; i < 4; i++ { // read first 4
+		_ = runInstance.readDataFromObj(t, co, chunkSize*int64(i), chunkSize*int64(i+1), false)
+	}
+	_ = runInstance.readDataFromObj(t, co, int64(0), chunkSize-1, false)
+	cfs.CleanUpCache(true)
+	// the first chunk must be in cache
+	require.True(t, boltDb.HasChunk(co, int64(0)))
+}
+
 func TestInternalExpiredEntriesRemoved(t *testing.T) {
 	id := fmt.Sprintf("tieer%v", time.Now().Unix())
 	vfsflags.Opt.DirCacheTime = time.Second * 4 // needs to be lower than the defined
